@@ -25,7 +25,6 @@ openpyxl>=3.1,<4.0
 
 # File type validation (optional — falls back to mimetypes if absent)
 # python-magic-bin is the Windows-compatible build; on Linux use python-magic
-python-magic-bin>=0.4,<1.0
 
 # Google Drive backup (optional — only needed when GDRIVE_CREDENTIALS is set)
 # Uncomment when you configure Google Drive:
