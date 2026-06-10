@@ -524,12 +524,12 @@ TRANSLATIONS = {
         "backup_date":           "Date",
         "backup_size":           "Size (KB)",
         "backup_source":         "Source",
-        "backup_gdrive":         "Google Drive",
+        "backup_email":          "Email",
         "backup_actions":        "Actions",
         "backup_source_auto":    "Auto",
         "backup_source_manual":  "Manual",
-        "backup_gdrive_ok":      "Uploaded ✓",
-        "backup_gdrive_none":    "Not configured",
+        "backup_email_sent":     "Sent ✓",
+        "backup_email_none":     "Not sent",
         "backup_download":       "Download",
         "backup_restore":        "Restore",
         "backup_confirm_restore":"Are you sure you want to restore this backup? ALL current data will be replaced.",
@@ -772,12 +772,12 @@ TRANSLATIONS = {
         "backup_date":           "التاريخ",
         "backup_size":           "الحجم (KB)",
         "backup_source":         "المصدر",
-        "backup_gdrive":         "Google Drive",
+        "backup_email":          "البريد الإلكتروني",
         "backup_actions":        "الإجراءات",
         "backup_source_auto":    "تلقائي",
         "backup_source_manual":  "يدوي",
-        "backup_gdrive_ok":      "مرفوع ✓",
-        "backup_gdrive_none":    "غير مُعدّ",
+        "backup_email_sent":     "تم الإرسال ✓",
+        "backup_email_none":     "لم يُرسل",
         "backup_download":       "تحميل",
         "backup_restore":        "استعادة",
         "backup_confirm_restore":"هل أنت متأكد من استعادة هذه النسخة؟ ستُستبدل جميع البيانات الحالية.",
@@ -1159,6 +1159,7 @@ class Backup(db.Model):
     size_kb    = db.Column(db.Integer,     nullable=True)
     source     = db.Column(db.String(20),  default="auto",  nullable=False)  # auto / manual
     gdrive_id  = db.Column(db.String(200), nullable=True)   # Google Drive file ID; None if Drive not configured
+    email_sent = db.Column(db.Boolean,     default=False,   nullable=False)  # True if backup email was sent successfully
     data       = db.Column(db.Text,        nullable=False)   # full JSON snapshot of all tables
 
     def __repr__(self):
@@ -1767,6 +1768,8 @@ def send_backup_email(backup: Backup, json_bytes: bytes) -> None:
             data=json_bytes,
         )
         mail.send(msg)
+        backup.email_sent = True
+        db.session.commit()
         app.logger.info(f"[Backup] Email sent to {backup_to!r} — {filename}")
     except Exception as exc:
         app.logger.warning(f"[Backup] Email send failed: {exc}")
@@ -4237,7 +4240,7 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
           <th>{{ t('backup_date') }}</th>
           <th class="text-center">{{ t('backup_size') }}</th>
           <th class="text-center">{{ t('backup_source') }}</th>
-          <th class="text-center">{{ t('backup_gdrive') }}</th>
+          <th class="text-center">{{ t('backup_email') }}</th>
           <th class="text-end">{{ t('backup_actions') }}</th>
         </tr>
       </thead>
@@ -4272,12 +4275,12 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
               {% endif %}
             </td>
 
-            {# Google Drive status #}
+            {# Email status #}
             <td class="text-center">
-              {% if b.gdrive_id %}
-                <span class="text-success small"><i class="bi bi-cloud-check-fill me-1"></i>{{ t('backup_gdrive_ok') }}</span>
+              {% if b.email_sent %}
+                <span class="text-success small"><i class="bi bi-envelope-check-fill me-1"></i>{{ t('backup_email_sent') }}</span>
               {% else %}
-                <span class="text-muted small"><i class="bi bi-cloud-slash me-1"></i>{{ t('backup_gdrive_none') }}</span>
+                <span class="text-muted small"><i class="bi bi-envelope-slash me-1"></i>{{ t('backup_email_none') }}</span>
               {% endif %}
             </td>
 
@@ -6879,6 +6882,7 @@ def ensure_columns():
         ("users",       "is_available",        "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 1"),
         ("users",       "password_changed_at", "TIMESTAMP",        "TEXT",             None),
         ("attachments", "file_data",           "BYTEA",            "BLOB",             None),  # Railway DB storage
+        ("backups",     "email_sent",          "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT FALSE"),
     ]
     with app.app_context():
         is_postgres = db.engine.dialect.name == "postgresql"
