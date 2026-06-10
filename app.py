@@ -1734,8 +1734,14 @@ def create_backup(source: str = "auto") -> Backup | None:
                 f"source={source} drive={'yes' if gdrive_id else 'no'}"
             )
 
-            # ── 6. Send backup as email attachment ───────────────────
-            send_backup_email(backup, json_bytes)
+            # ── 6. Send backup as email attachment (background thread) ──
+            import threading
+            t = threading.Thread(
+                target=send_backup_email,
+                args=(backup.id, json_bytes),
+                daemon=True,
+            )
+            t.start()
 
             return backup
 
@@ -1745,43 +1751,49 @@ def create_backup(source: str = "auto") -> Backup | None:
         return None
 
 
-def send_backup_email(backup: Backup, json_bytes: bytes) -> None:
+def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
     """
     Send the backup JSON as an email attachment to BACKUP_MAIL_TO.
+    Runs in a background thread — accepts backup_id (not the ORM object)
+    to avoid detached-instance errors across thread boundaries.
     Silently skipped if MAIL_SERVER or BACKUP_MAIL_TO are not configured.
     """
-    import io
     backup_to = os.environ.get("BACKUP_MAIL_TO", "")
     if not app.config.get("MAIL_SERVER") or not backup_to:
         return
 
-    try:
-        filename = f"backup_{backup.created_at.strftime('%Y%m%d_%H%M%S')}.json"
-        subject  = f"[Ticket System] Backup — {backup.created_at.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
-        body     = (
-            f"نسخة احتياطية تلقائية من نظام التذاكر\n\n"
-            f"التاريخ   : {backup.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"الحجم     : {backup.size_kb} KB\n"
-            f"المصدر    : {backup.source}\n\n"
-            f"الملف المرفق يحتوي على نسخة كاملة من جميع البيانات.\n"
-            f"احتفظ به في مكان آمن."
-        )
-        msg = MailMessage(
-            subject=subject,
-            recipients=[backup_to],
-            body=body,
-        )
-        msg.attach(
-            filename=filename,
-            content_type="application/json",
-            data=json_bytes,
-        )
-        mail.send(msg)
-        backup.email_sent = True
-        db.session.commit()
-        app.logger.info(f"[Backup] Email sent to {backup_to!r} — {filename}")
-    except Exception as exc:
-        app.logger.warning(f"[Backup] Email send failed: {exc}")
+    with app.app_context():
+        try:
+            backup = db.session.get(Backup, backup_id)
+            if not backup:
+                return
+
+            filename = f"backup_{backup.created_at.strftime('%Y%m%d_%H%M%S')}.json"
+            subject  = f"[Ticket System] Backup — {backup.created_at.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
+            body     = (
+                f"نسخة احتياطية تلقائية من نظام التذاكر\n\n"
+                f"التاريخ   : {backup.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"الحجم     : {backup.size_kb} KB\n"
+                f"المصدر    : {backup.source}\n\n"
+                f"الملف المرفق يحتوي على نسخة كاملة من جميع البيانات.\n"
+                f"احتفظ به في مكان آمن."
+            )
+            msg = MailMessage(
+                subject=subject,
+                recipients=[backup_to],
+                body=body,
+            )
+            msg.attach(
+                filename=filename,
+                content_type="application/json",
+                data=json_bytes,
+            )
+            mail.send(msg)
+            backup.email_sent = True
+            db.session.commit()
+            app.logger.info(f"[Backup] Email sent to {backup_to!r} — {filename}")
+        except Exception as exc:
+            app.logger.warning(f"[Backup] Email send failed: {exc}")
 
 
 def restore_from_backup(backup: Backup) -> None:
