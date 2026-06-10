@@ -1723,12 +1723,53 @@ def create_backup(source: str = "auto") -> Backup | None:
                 f"[Backup] Created — id={backup.id} size={size_kb}KB "
                 f"source={source} drive={'yes' if gdrive_id else 'no'}"
             )
+
+            # ── 6. Send backup as email attachment ───────────────────
+            send_backup_email(backup, json_bytes)
+
             return backup
 
     except Exception as exc:
         app.logger.error(f"[Backup] create_backup failed: {exc}")
         db.session.rollback()
         return None
+
+
+def send_backup_email(backup: Backup, json_bytes: bytes) -> None:
+    """
+    Send the backup JSON as an email attachment to BACKUP_MAIL_TO.
+    Silently skipped if MAIL_SERVER or BACKUP_MAIL_TO are not configured.
+    """
+    import io
+    backup_to = os.environ.get("BACKUP_MAIL_TO", "")
+    if not app.config.get("MAIL_SERVER") or not backup_to:
+        return
+
+    try:
+        filename = f"backup_{backup.created_at.strftime('%Y%m%d_%H%M%S')}.json"
+        subject  = f"[Ticket System] Backup — {backup.created_at.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
+        body     = (
+            f"نسخة احتياطية تلقائية من نظام التذاكر\n\n"
+            f"التاريخ   : {backup.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"الحجم     : {backup.size_kb} KB\n"
+            f"المصدر    : {backup.source}\n\n"
+            f"الملف المرفق يحتوي على نسخة كاملة من جميع البيانات.\n"
+            f"احتفظ به في مكان آمن."
+        )
+        msg = MailMessage(
+            subject=subject,
+            recipients=[backup_to],
+            body=body,
+        )
+        msg.attach(
+            filename=filename,
+            content_type="application/json",
+            data=json_bytes,
+        )
+        mail.send(msg)
+        app.logger.info(f"[Backup] Email sent to {backup_to!r} — {filename}")
+    except Exception as exc:
+        app.logger.warning(f"[Backup] Email send failed: {exc}")
 
 
 def restore_from_backup(backup: Backup) -> None:
@@ -6913,6 +6954,48 @@ def ensure_cols_command():
     """
     ensure_columns()
     click.echo("✅ ensure_columns() completed.")
+
+
+# ─────────────────────────────────────────────
+# CLI: init-db
+# ─────────────────────────────────────────────
+@app.cli.command("init-db")
+def init_db_command():
+    """
+    First-time Railway/production setup — run this once after deploying:
+
+        flask init-db
+
+    What it does (in order):
+      1. db.create_all()   — creates every table that doesn't exist yet
+      2. ensure_columns()  — adds any new columns to existing tables
+      3. seed departments  — inserts the default departments if none exist
+
+    Safe to re-run: create_all() and ensure_columns() are both idempotent.
+    """
+    with app.app_context():
+        click.echo("⏳ Creating tables...")
+        db.create_all()
+        click.echo("✅ Tables created (or already exist).")
+
+        click.echo("⏳ Ensuring columns...")
+        ensure_columns()
+        click.echo("✅ Columns verified.")
+
+        # Seed default departments if none exist
+        if Department.query.count() == 0:
+            default_departments = [
+                "Human Resources", "Information Technology", "Finance",
+                "Operations", "Customer Service", "Administration",
+            ]
+            for name in default_departments:
+                db.session.add(Department(name=name))
+            db.session.commit()
+            click.echo(f"✅ Seeded {len(default_departments)} default departments.")
+        else:
+            click.echo("✅ Departments already exist — skipped seeding.")
+
+    click.echo("\n🎉 Database ready. Open the app and create your admin account.")
 
 
 if __name__ == "__main__":
