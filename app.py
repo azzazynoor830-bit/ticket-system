@@ -4375,28 +4375,6 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
   </div>
 </div>
 
-<script>
-document.getElementById('restoreModal').addEventListener('show.bs.modal', function (e) {
-  var btn = e.relatedTarget;
-  var id  = btn.getAttribute('data-backup-id');
-  var dt  = btn.getAttribute('data-backup-date');
-  document.getElementById('restoreDate').textContent = dt;
-  document.getElementById('restoreForm').action =
-    '/admin/backups/' + id + '/restore';
-});
-</script>
-
-<script>
-document.getElementById('deleteBackupModal').addEventListener('show.bs.modal', function (e) {
-  var btn = e.relatedTarget;
-  var id  = btn.getAttribute('data-backup-id');
-  var dt  = btn.getAttribute('data-backup-date');
-  document.getElementById('deleteBackupDate').textContent = dt;
-  document.getElementById('deleteBackupForm').action =
-    '/admin/backups/' + id + '/delete';
-});
-</script>
-
 {# ── Delete Backup Confirmation Modal ────────────────────────────── #}
 <div class="modal fade" id="deleteBackupModal" tabindex="-1">
   <div class="modal-dialog modal-dialog-centered">
@@ -4432,6 +4410,26 @@ document.getElementById('deleteBackupModal').addEventListener('show.bs.modal', f
     </div>
   </div>
 </div>
+
+
+<script>
+document.getElementById('restoreModal').addEventListener('show.bs.modal', function (e) {
+  var btn = e.relatedTarget;
+  var id  = btn.getAttribute('data-backup-id');
+  var dt  = btn.getAttribute('data-backup-date');
+  document.getElementById('restoreDate').textContent = dt;
+  document.getElementById('restoreForm').action =
+    '/admin/backups/' + id + '/restore';
+});
+document.getElementById('deleteBackupModal').addEventListener('show.bs.modal', function (e) {
+  var btn = e.relatedTarget;
+  var id  = btn.getAttribute('data-backup-id');
+  var dt  = btn.getAttribute('data-backup-date');
+  document.getElementById('deleteBackupDate').textContent = dt;
+  document.getElementById('deleteBackupForm').action =
+    '/admin/backups/' + id + '/delete';
+});
+</script>
 
 {% endblock %}
 """,
