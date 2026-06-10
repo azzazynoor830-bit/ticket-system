@@ -94,6 +94,7 @@ class BaseConfig:
     MAIL_USE_SSL     = os.environ.get("MAIL_USE_SSL", "false").lower() == "true"
     MAIL_USERNAME    = os.environ.get("MAIL_USERNAME", "")
     MAIL_PASSWORD    = os.environ.get("MAIL_PASSWORD", "")
+    MAIL_TIMEOUT     = 5  # seconds — prevents long hangs when SMTP is blocked
     MAIL_DEFAULT_SENDER = os.environ.get(
         "MAIL_DEFAULT_SENDER",
         os.environ.get("MAIL_USERNAME", "noreply@ticketsystem.local"),
