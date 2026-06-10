@@ -538,6 +538,10 @@ TRANSLATIONS = {
         "flash_backup_created":  "Backup created successfully",
         "flash_backup_restored": "Backup restored successfully",
         "flash_backup_error":    "Backup failed — check server logs",
+        "backup_delete":         "Delete",
+        "backup_confirm_delete": "Are you sure you want to delete this backup? This action cannot be undone.",
+        "flash_backup_deleted":  "Backup deleted successfully",
+        "flash_delete_error":    "Delete failed — check server logs",
         "flash_restore_error":   "Restore failed — check server logs",
         # Ticket types (displayed in UI)
         "ttype_it_support":      "IT Support",
@@ -786,6 +790,10 @@ TRANSLATIONS = {
         "flash_backup_created":  "تم إنشاء النسخة الاحتياطية بنجاح",
         "flash_backup_restored": "تمت استعادة النسخة الاحتياطية بنجاح",
         "flash_backup_error":    "فشل إنشاء النسخة الاحتياطية — راجع سجل الخادم",
+        "backup_delete":         "حذف",
+        "backup_confirm_delete": "هل أنت متأكد من حذف هذه النسخة الاحتياطية؟ لا يمكن التراجع عن هذا الإجراء.",
+        "flash_backup_deleted":  "تم حذف النسخة الاحتياطية بنجاح",
+        "flash_delete_error":    "فشل الحذف — راجع سجل الخادم",
         "flash_restore_error":   "فشلت عملية الاستعادة — راجع سجل الخادم",
         # أنواع التذاكر (تُعرض في الواجهة)
         "ttype_it_support":      "طلب دعم تقني",
@@ -4296,13 +4304,24 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
 
               {# Restore — requires confirmation modal #}
               <button type="button"
-                      class="btn btn-outline-danger btn-sm"
+                      class="btn btn-outline-danger btn-sm me-1"
                       title="{{ t('backup_restore') }}"
                       data-bs-toggle="modal"
                       data-bs-target="#restoreModal"
                       data-backup-id="{{ b.id }}"
                       data-backup-date="{{ b.created_at.strftime('%Y-%m-%d %H:%M') }}">
                 <i class="bi bi-arrow-counterclockwise"></i>
+              </button>
+
+              {# Delete — requires confirmation modal #}
+              <button type="button"
+                      class="btn btn-outline-secondary btn-sm"
+                      title="{{ t('backup_delete') }}"
+                      data-bs-toggle="modal"
+                      data-bs-target="#deleteBackupModal"
+                      data-backup-id="{{ b.id }}"
+                      data-backup-date="{{ b.created_at.strftime('%Y-%m-%d %H:%M') }}">
+                <i class="bi bi-trash"></i>
               </button>
             </td>
           </tr>
@@ -4365,7 +4384,51 @@ document.getElementById('restoreModal').addEventListener('show.bs.modal', functi
   document.getElementById('restoreForm').action =
     '/admin/backups/' + id + '/restore';
 });
+document.getElementById('deleteBackupModal').addEventListener('show.bs.modal', function (e) {
+  var btn = e.relatedTarget;
+  var id  = btn.getAttribute('data-backup-id');
+  var dt  = btn.getAttribute('data-backup-date');
+  document.getElementById('deleteBackupDate').textContent = dt;
+  document.getElementById('deleteBackupForm').action =
+    '/admin/backups/' + id + '/delete';
+});
 </script>
+
+{# ── Delete Backup Confirmation Modal ────────────────────────────── #}
+<div class="modal fade" id="deleteBackupModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content border-0 shadow">
+      <div class="modal-header bg-secondary text-white">
+        <h5 class="modal-title fw-bold">
+          <i class="bi bi-trash-fill me-2"></i>
+          {{ t('backup_delete') }}
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2">{{ t('backup_confirm_delete') }}</p>
+        <p class="small text-muted mb-0">
+          {% if lang == 'ar' %}
+            النسخة: <strong id="deleteBackupDate"></strong>
+          {% else %}
+            Snapshot: <strong id="deleteBackupDate"></strong>
+          {% endif %}
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">
+          {{ t('cancel') }}
+        </button>
+        <form method="POST" id="deleteBackupForm">
+          {{ form.hidden_tag() }}
+          <button type="submit" class="btn btn-secondary btn-sm">
+            <i class="bi bi-trash me-1"></i>{{ t('backup_delete') }}
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
 
 {% endblock %}
 """,
@@ -6661,6 +6724,26 @@ def restore_backup(backup_id):
         db.session.rollback()
         app.logger.error(f"[Restore] failed for backup id={backup_id}: {exc}")
         flash(t("flash_restore_error"), "danger")
+    return redirect(url_for("admin.backups_list"))
+
+
+@admin_bp.route("/backups/<int:backup_id>/delete", methods=["POST"])
+@admin_required
+def delete_backup(backup_id):
+    """Permanently delete a single backup snapshot."""
+    form = EmptyForm()
+    if not form.validate_on_submit():
+        abort(400)
+
+    backup = db.get_or_404(Backup, backup_id)
+    try:
+        db.session.delete(backup)
+        db.session.commit()
+        flash(t("flash_backup_deleted"), "success")
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.error(f"[Backup] delete failed for id={backup_id}: {exc}")
+        flash(t("flash_delete_error"), "danger")
     return redirect(url_for("admin.backups_list"))
 
 
