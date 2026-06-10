@@ -4384,6 +4384,9 @@ document.getElementById('restoreModal').addEventListener('show.bs.modal', functi
   document.getElementById('restoreForm').action =
     '/admin/backups/' + id + '/restore';
 });
+</script>
+
+<script>
 document.getElementById('deleteBackupModal').addEventListener('show.bs.modal', function (e) {
   var btn = e.relatedTarget;
   var id  = btn.getAttribute('data-backup-id');
