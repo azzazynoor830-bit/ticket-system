@@ -150,6 +150,9 @@ class ProductionConfig(BaseConfig):
         # before SQLAlchemy sees it to avoid a NoSuchModuleError crash.
         if uri.startswith("postgres://"):
             uri = "postgresql://" + uri[len("postgres://"):]
+        # psycopg2 rejects "sslmode=req" — Railway sometimes delivers this
+        # truncated form. Expand it to the correct "sslmode=require".
+        uri = uri.replace("sslmode=req&", "sslmode=require&").replace("sslmode=req", "sslmode=require")
         return uri
 
     @property
