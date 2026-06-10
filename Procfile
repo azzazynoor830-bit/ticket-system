@@ -11,4 +11,4 @@
 # If you ever scale to --workers 2, also set SCHEDULER_ENABLED=false on
 # the second worker via Railway's service environment variables.
 
-web: gunicorn app:app --workers 1 --threads 4 --bind 0.0.0.0:$PORT --timeout 120
+web: python -c "from app import app, db; app.app_context().push(); db.create_all()" && gunicorn app:app --workers 1 --threads 4 --bind 0.0.0.0:$PORT --timeout 120
