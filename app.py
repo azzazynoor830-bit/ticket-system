@@ -6,6 +6,7 @@ Phase 1: Models + DB + Templates + SLA Scheduler
 
 import os
 import logging
+import threading
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -264,13 +265,13 @@ def validate_password(password):
     """Returns list of error strings; empty list = valid."""
     errors = []
     if len(password) < 10:
-        errors.append("Password must be at least 10 characters")
+        errors.append(t("err_pw_min_len"))
     if not any(c.isupper() for c in password):
-        errors.append("Password must contain at least one uppercase letter")
+        errors.append(t("err_pw_upper"))
     if not any(c.isdigit() for c in password):
-        errors.append("Password must contain at least one number")
+        errors.append(t("err_pw_digit"))
     if not any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in password):
-        errors.append("Password must contain at least one special character (!@#$%^&*...)")
+        errors.append(t("err_pw_special"))
     return errors
 
 
@@ -308,6 +309,7 @@ TRANSLATIONS = {
         "in_progress":       "In Progress",
         "closed":            "Closed",
         "my_tickets":        "My Tickets",
+        "assigned_to_me":    "Assigned to Me",
         "new_ticket":        "New Ticket",
         "ticket_number":     "Ticket #",
         "title":             "Title",
@@ -323,6 +325,8 @@ TRANSLATIONS = {
         "choose_dept":       "-- Choose Department --",
         "assign_to":         "Assign To",
         "choose_dept_first": "-- Choose Department First --",
+        "choose_assignee":   "-- Select Assignee --",
+        "no_agents_in_dept": "-- No agents in this department --",
         "description":       "Description",
         "cancel":            "Cancel",
         "send_ticket":       "Submit Ticket",
@@ -387,6 +391,7 @@ TRANSLATIONS = {
         "flash_logged_out":  "Logged out successfully",
         "flash_ticket_ok":   "Ticket {num} opened successfully",
         "flash_update_ok":   "Ticket updated successfully",
+        "flash_bulk_done":   "Bulk action applied to {count} ticket(s).",
         "flash_comment_ok":  "Comment added",
         "flash_user_ok":     "User {name} created",
         "flash_user_upd":    "User updated",
@@ -555,6 +560,47 @@ TRANSLATIONS = {
         "choose_type":           "-- Choose Type --",
         "choose_dept_first_type":"-- Choose Department First --",
         "dept_types_hint":       "Leave all unchecked to allow all ticket types.",
+        # ── Bulk action bar & deleted tickets table ─────────────────────────
+        "sel_count_zero":        "0 selected",
+        "choose_action":         "— Choose Action —",
+        "waiting_customer":      "Waiting for Customer",
+        "waiting_vendor":        "Waiting for Vendor",
+        "reopened":              "Reopened",
+        "apply":                 "Apply",
+        "deleted_at_col":        "Deleted At",
+        # ── Flash messages ────────────────────────────────────────────────────
+        "err_fields_required":   "All fields are required",
+        "err_email_taken":       "Email is already in use",
+        "err_username_taken":    "Username is already taken",
+        "err_pw_no_match":       "Passwords do not match",
+        "err_pw_min_len":        "Password must be at least 10 characters",
+        "err_pw_upper":          "Password must contain at least one uppercase letter",
+        "err_pw_digit":          "Password must contain at least one number",
+        "err_pw_special":        "Password must contain at least one special character (!@#$%^&*...)",
+        "flash_reset_sent":      "Password reset link has been sent to your email.",
+        "flash_reset_fallback":  "If that email exists in our system, a reset link has been sent.",
+        "flash_reset_no_smtp":   "Email service is not configured. Please contact the administrator to reset your password.",
+        "err_reset_invalid":     "The password reset link is invalid or has expired (1 hour limit).",
+        "err_user_not_found":    "User not found.",
+        "flash_pw_updated":      "Password updated successfully. Please log in.",
+        "flash_welcome":         "Welcome {name}! Account created successfully. Please log in.",
+        "err_invalid_priority":  "Invalid priority value.",
+        "err_title_empty":       "Title cannot be empty.",
+        "err_desc_empty":        "Description cannot be empty.",
+        "err_ticket_create":     "Could not create ticket — please try again.",
+        "err_attach_closed":     "Cannot add attachments to a closed ticket",
+        "err_file_not_found":    "File not found",
+        "err_invalid_request":   "Invalid request. Please try again.",
+        "err_invalid_status":    "Invalid status value.",
+        "err_invalid_assignee":  "Invalid assignee.",
+        "err_assignee_inactive": "Selected assignee is not valid, inactive, or not an agent.",
+        "err_csrf":              "CSRF validation failed.",
+        "err_no_tickets_selected": "No tickets selected.",
+        "err_no_valid_tickets":  "No valid tickets found.",
+        "err_dept_name_required": "Department name is required.",
+        "flash_ticket_restored": "Ticket [{num}] restored successfully.",
+        "flash_dept_restored":   "Department \'{name}\' restored.",
+        "err_openpyxl":          "openpyxl is not installed. Run: pip install openpyxl",
     },
     "ar": {
         "app_title":         "نظام التذاكر",
@@ -571,6 +617,7 @@ TRANSLATIONS = {
         "in_progress":       "قيد التنفيذ",
         "closed":            "مغلقة",
         "my_tickets":        "تذاكري",
+        "assigned_to_me":    "المُعيَّنة لي",
         "new_ticket":        "تذكرة جديدة",
         "ticket_number":     "رقم التذكرة",
         "title":             "العنوان",
@@ -585,6 +632,8 @@ TRANSLATIONS = {
         "choose_dept":       "-- اختر القسم --",
         "assign_to":         "تعيين إلى",
         "choose_dept_first": "-- اختر القسم أولاً --",
+        "choose_assignee":   "-- اختر المُعيَّن --",
+        "no_agents_in_dept": "-- لا يوجد وكلاء في هذا القسم --",
         "description":       "الوصف",
         "cancel":            "إلغاء",
         "send_ticket":       "إرسال التذكرة",
@@ -601,7 +650,7 @@ TRANSLATIONS = {
         "change_status":     "تغيير الحالة",
         "save_changes":      "حفظ التغييرات",
         "control_panel":     "لوحة التحكم",
-        "breached":          "SLA Breached",
+        "breached":          "تجاوز SLA",
         "resolved":          "محلولة",
         "critical_open":     "حرجة (مفتوحة)",
         "unassigned_lbl":    "غير مُعيَّنة",
@@ -642,6 +691,7 @@ TRANSLATIONS = {
         "flash_logged_out":  "تم تسجيل الخروج بنجاح",
         "flash_ticket_ok":   "تم فتح التذكرة {num} بنجاح",
         "flash_update_ok":   "تم تحديث التذكرة بنجاح",
+        "flash_bulk_done":   "تم تطبيق الإجراء الجماعي على {count} تذكرة.",
         "flash_comment_ok":  "تم إضافة التعليق",
         "flash_user_ok":     "تم إنشاء المستخدم {name}",
         "flash_user_upd":    "تم تحديث المستخدم",
@@ -807,11 +857,56 @@ TRANSLATIONS = {
         "choose_type":           "-- اختر النوع --",
         "choose_dept_first_type":"-- اختر القسم أولاً --",
         "dept_types_hint":       "اتركها كلها فارغة للسماح بجميع أنواع التذاكر.",
+        # ── Bulk action bar & deleted tickets table ─────────────────────────
+        "sel_count_zero":        "0 محدد",
+        "choose_action":         "— اختر إجراء —",
+        "waiting_customer":      "في انتظار العميل",
+        "waiting_vendor":        "في انتظار المورد",
+        "reopened":              "معاد فتحها",
+        "apply":                 "تطبيق",
+        "deleted_at_col":        "تاريخ الحذف",
+        # ── Flash messages ────────────────────────────────────────────────────
+        "err_fields_required":   "جميع الحقول مطلوبة",
+        "err_email_taken":       "البريد الإلكتروني مستخدم بالفعل",
+        "err_username_taken":    "اسم المستخدم مستخدم بالفعل",
+        "err_pw_no_match":       "كلمتا المرور غير متطابقتين",
+        "err_pw_min_len":        "يجب أن تكون كلمة المرور 10 أحرف على الأقل",
+        "err_pw_upper":          "يجب أن تحتوي كلمة المرور على حرف كبير واحد على الأقل",
+        "err_pw_digit":          "يجب أن تحتوي كلمة المرور على رقم واحد على الأقل",
+        "err_pw_special":        "يجب أن تحتوي كلمة المرور على رمز خاص واحد على الأقل (!@#$%^&*...)",
+        "flash_reset_sent":      "تم إرسال رابط إعادة التعيين إلى بريدك الإلكتروني.",
+        "flash_reset_fallback":  "إذا كان البريد موجوداً في النظام، تم إرسال رابط إعادة التعيين.",
+        "flash_reset_no_smtp":   "خدمة البريد الإلكتروني غير مُعدَّة. يرجى التواصل مع المسؤول لإعادة تعيين كلمة المرور.",
+        "err_reset_invalid":     "رابط إعادة التعيين غير صالح أو انتهت صلاحيته (حد أقصى ساعة).",
+        "err_user_not_found":    "المستخدم غير موجود.",
+        "flash_pw_updated":      "تم تحديث كلمة المرور بنجاح. يرجى تسجيل الدخول.",
+        "flash_welcome":         "مرحباً {name}! تم إنشاء الحساب بنجاح. يرجى تسجيل الدخول.",
+        "err_invalid_priority":  "قيمة الأولوية غير صالحة.",
+        "err_title_empty":       "العنوان لا يمكن أن يكون فارغاً.",
+        "err_desc_empty":        "الوصف لا يمكن أن يكون فارغاً.",
+        "err_ticket_create":     "تعذّر إنشاء التذكرة — يرجى المحاولة مرة أخرى.",
+        "err_attach_closed":     "لا يمكن إضافة مرفقات لتذكرة مغلقة",
+        "err_file_not_found":    "الملف غير موجود",
+        "err_invalid_request":   "طلب غير صالح. يرجى المحاولة مرة أخرى.",
+        "err_invalid_status":    "قيمة الحالة غير صالحة.",
+        "err_invalid_assignee":  "المُعيَّن غير صالح.",
+        "err_assignee_inactive": "المُعيَّن المختار غير صالح أو غير نشط أو ليس وكيلاً.",
+        "err_csrf":              "فشل التحقق الأمني. يرجى المحاولة مرة أخرى.",
+        "err_no_tickets_selected": "لم يتم تحديد أي تذاكر.",
+        "err_no_valid_tickets":  "لا توجد تذاكر صالحة.",
+        "err_dept_name_required": "اسم القسم مطلوب.",
+        "flash_ticket_restored": "تم استعادة التذكرة [{num}] بنجاح.",
+        "flash_dept_restored":   "تم استعادة القسم \'{name}\' بنجاح.",
+        "err_openpyxl":          "مكتبة openpyxl غير مثبتة. قم بتشغيل: pip install openpyxl",
     },
 }
 
 def get_lang():
-    return flask_session.get("lang", "en")
+    try:
+        return flask_session.get("lang", "en")
+    except RuntimeError:
+        # Outside request context (e.g. unit tests, background jobs)
+        return "en"
 
 def t(key, **kwargs):
     lang = get_lang()
@@ -1188,23 +1283,29 @@ def load_user(user_id):
 # HELPERS
 # ─────────────────────────────────────────────
 
+# Lock prevents two threads from generating the same ticket number simultaneously.
+# Protects the read-check-return sequence in generate_ticket_number() from race conditions.
+_ticket_number_lock = threading.Lock()
+
 def generate_ticket_number():
     """
     Generate TKT-YYYY-NNNN.
-    Handles the race condition: if two transactions arrive at the same count
-    simultaneously, the UNIQUE constraint on ticket_number prevents duplicates,
-    and the retry loop automatically tries count+1 instead of failing the request.
+    The threading.Lock ensures only one thread at a time executes the
+    read-check-return sequence, preventing duplicate numbers under concurrent load.
+    For multi-process deployments (Gunicorn), the UNIQUE constraint on ticket_number
+    still guards against cross-process duplicates.
     """
-    year = datetime.now(timezone.utc).replace(tzinfo=None).year
-    base_count = Ticket.query.filter(
-        extract("year", Ticket.created_at) == year
-    ).count() + 1
+    with _ticket_number_lock:
+        year = datetime.now(timezone.utc).replace(tzinfo=None).year
+        base_count = Ticket.query.filter(
+            extract("year", Ticket.created_at) == year
+        ).count() + 1
 
-    for attempt in range(10):   # Max 10 attempts — sufficient for any realistic load
-        candidate = f"TKT-{year}-{base_count + attempt:04d}"
-        # Ensure the number does not already exist before returning it
-        if not Ticket.query.filter_by(ticket_number=candidate).first():
-            return candidate
+        for attempt in range(10):   # Max 10 attempts — sufficient for any realistic load
+            candidate = f"TKT-{year}-{base_count + attempt:04d}"
+            # Ensure the number does not already exist before returning it
+            if not Ticket.query.filter_by(ticket_number=candidate).first():
+                return candidate
 
     # Very rare fallback — short UUID guarantees uniqueness
     import uuid
@@ -1687,6 +1788,12 @@ def create_backup(source: str = "auto") -> Backup | None:
                         "file_size":     a.file_size,
                         "mime_type":     a.mime_type,
                         "created_at":    a.created_at.isoformat() if a.created_at else None,
+                        # file_data stored as base64 so it survives JSON serialization.
+                        # On Railway deployments filename=None and bytes live in file_data.
+                        # Without this field restore produces records with both NULL —
+                        # every download would return "File not found".
+                        "file_data_b64": __import__("base64").b64encode(a.file_data).decode("ascii")
+                                         if a.file_data is not None else None,
                     }
                     for a in Attachment.query.all()
                 ],
@@ -1736,12 +1843,12 @@ def create_backup(source: str = "auto") -> Backup | None:
 
             # ── 6. Send backup as email attachment (background thread) ──
             import threading
-            t = threading.Thread(
+            backup_thread = threading.Thread(
                 target=send_backup_email,
                 args=(backup.id, json_bytes),
                 daemon=True,
             )
-            t.start()
+            backup_thread.start()
 
             return backup
 
@@ -1757,7 +1864,13 @@ def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
     Runs in a background thread — accepts backup_id (not the ORM object)
     to avoid detached-instance errors across thread boundaries.
     Silently skipped if MAIL_SERVER or BACKUP_MAIL_TO are not configured.
+
+    The email attachment intentionally excludes file_data_b64 (binary
+    attachment content) to keep the email size well within SMTP limits
+    (Gmail = 25 MB, many servers = 10 MB).  The full backup including
+    file bytes is always stored in Neon and can be restored from there.
     """
+    import json as _json_email
     backup_to = os.environ.get("BACKUP_MAIL_TO", "")
     if not app.config.get("MAIL_SERVER") or not backup_to:
         return
@@ -1768,14 +1881,36 @@ def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
             if not backup:
                 return
 
+            # ── Build a stripped copy: remove file_data_b64 from every
+            #    attachment entry so the email stays small.
+            #    The full binary data is already safely stored in Neon. ──
+            try:
+                data_for_email = _json_email.loads(json_bytes.decode("utf-8"))
+                for att in data_for_email.get("attachments", []):
+                    att["file_data_b64"] = None   # strip binary — restore from Neon
+                email_bytes = _json_email.dumps(
+                    data_for_email, ensure_ascii=False, indent=2
+                ).encode("utf-8")
+            except Exception as _strip_err:
+                # Fallback: if stripping fails for any reason, skip the email
+                # rather than send an oversized attachment that SMTP will reject.
+                app.logger.warning(
+                    f"[Backup] Could not strip file_data_b64 for email "
+                    f"(backup_id={backup_id}): {_strip_err} — email skipped."
+                )
+                return
+
+            email_size_kb = len(email_bytes) // 1024
             filename = f"backup_{backup.created_at.strftime('%Y%m%d_%H%M%S')}.json"
             subject  = f"[Ticket System] Backup — {backup.created_at.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
             body     = (
                 f"نسخة احتياطية تلقائية من نظام التذاكر\n\n"
                 f"التاريخ   : {backup.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"الحجم     : {backup.size_kb} KB\n"
+                f"الحجم الكامل : {backup.size_kb} KB (محفوظ في Neon)\n"
+                f"حجم الملف المرفق : {email_size_kb} KB (بدون محتوى المرفقات الثنائية)\n"
                 f"المصدر    : {backup.source}\n\n"
-                f"الملف المرفق يحتوي على نسخة كاملة من جميع البيانات.\n"
+                f"الملف المرفق يحتوي على نسخة من جميع البيانات الهيكلية.\n"
+                f"محتوى المرفقات الثنائية محفوظ في قاعدة البيانات ويمكن استعادته منها.\n"
                 f"احتفظ به في مكان آمن."
             )
             msg = MailMessage(
@@ -1786,12 +1921,15 @@ def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
             msg.attach(
                 filename=filename,
                 content_type="application/json",
-                data=json_bytes,
+                data=email_bytes,
             )
             mail.send(msg)
             backup.email_sent = True
             db.session.commit()
-            app.logger.info(f"[Backup] Email sent to {backup_to!r} — {filename}")
+            app.logger.info(
+                f"[Backup] Email sent to {backup_to!r} — {filename} "
+                f"({email_size_kb} KB stripped / {backup.size_kb} KB full)"
+            )
         except Exception as exc:
             app.logger.warning(f"[Backup] Email send failed: {exc}")
 
@@ -1941,13 +2079,19 @@ def restore_from_backup(backup: Backup) -> None:
                 "created_at":  h.get("created_at"),
             })
 
-        # 7. Attachment records (metadata only — actual files are not restored)
+        # 7. Attachment records — restores both metadata and file bytes.
+        # Backups created before this fix will not have "file_data_b64" in their JSON;
+        # in that case file_data stays NULL (legacy behaviour, same as before).
+        # Backups created after this fix carry the bytes as base64 and are fully restored.
+        import base64 as _b64
         for a in data.get("attachments", []):
+            raw_b64   = a.get("file_data_b64")
+            file_bytes = _b64.b64decode(raw_b64) if raw_b64 is not None else None
             db.session.execute(db.text(
                 "INSERT INTO attachments "
-                "(id, ticket_id, uploaded_by, filename, original_name, file_size, mime_type, created_at) "
+                "(id, ticket_id, uploaded_by, filename, original_name, file_size, mime_type, created_at, file_data) "
                 "VALUES "
-                "(:id, :ticket_id, :uploaded_by, :filename, :original_name, :file_size, :mime_type, :created_at)"
+                "(:id, :ticket_id, :uploaded_by, :filename, :original_name, :file_size, :mime_type, :created_at, :file_data)"
             ), {
                 "id":            a["id"],
                 "ticket_id":     a["ticket_id"],
@@ -1957,6 +2101,7 @@ def restore_from_backup(backup: Backup) -> None:
                 "file_size":     a["file_size"],
                 "mime_type":     a["mime_type"],
                 "created_at":    a.get("created_at"),
+                "file_data":     file_bytes,
             })
 
         # 8. Notifications
@@ -2310,6 +2455,71 @@ TEMPLATES = {
   </div>
   {% endif %}
 </div>
+
+{# ── Tickets assigned to this employee ── #}
+{% if assigned_tickets.total > 0 %}
+<div class="d-flex justify-content-between align-items-center mb-3 mt-5">
+  <h5 class="fw-semibold mb-0">
+    <i class="bi bi-person-check text-info"></i> {{ t('assigned_to_me') }}
+    <span class="badge bg-info ms-1">{{ assigned_tickets.total }}</span>
+  </h5>
+</div>
+<div class="card border-0 shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>{{ t('ticket_number') }}</th>
+          <th>{{ t('title') }}</th>
+          <th>{{ t('type') }}</th>
+          <th>{{ t('priority') }}</th>
+          <th>{{ t('status') }}</th>
+          <th>{{ t('date') }}</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for tk in assigned_tickets.items %}
+        <tr>
+          <td><span class="badge bg-secondary">{{ tk.ticket_number }}</span></td>
+          <td>{{ tk.title|truncate(50) }}</td>
+          <td>{{ tk.type }}</td>
+          <td>
+            <span class="badge bg-{{ priority_color(tk.priority) }}{{ ' priority-high' if tk.priority == 'High' else '' }}">{{ tk.priority }}</span>
+          </td>
+          <td>
+            <span class="badge bg-{{ status_color(tk.status) }}">{{ tk.status }}</span>
+            {% if tk.sla_breached %}<i class="bi bi-exclamation-triangle-fill text-danger ms-1" title="SLA Breached"></i>{% endif %}
+          </td>
+          <td class="text-muted small">{{ tk.created_at.strftime('%Y-%m-%d') }}</td>
+          <td>
+            <a href="{{ url_for('employee.ticket_detail', ticket_id=tk.id) }}"
+               class="btn btn-outline-info btn-sm">{{ t('view') }}</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if assigned_tickets.pages > 1 %}
+  <div class="card-footer d-flex justify-content-center">
+    <nav>
+      <ul class="pagination mb-0">
+        {% for p in assigned_tickets.iter_pages(left_edge=1, right_edge=1, left_current=2, right_current=2) %}
+          {% if p %}
+          <li class="page-item {% if p == assigned_tickets.page %}active{% endif %}">
+            <a class="page-link" href="{{ url_for('main.dashboard', apage=p) }}">{{ p }}</a>
+          </li>
+          {% else %}
+          <li class="page-item disabled"><span class="page-link">…</span></li>
+          {% endif %}
+        {% endfor %}
+      </ul>
+    </nav>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
 {% endblock %}
 """,
 
@@ -2617,6 +2827,14 @@ TEMPLATES = {
               {% for u in agents %}
               <option value="{{ u.id }}"
                 {% if ticket.assigned_to == u.id %}selected{% endif %}>{{ u.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small">{{ t('priority') }}</label>
+            <select name="priority" class="form-select form-select-sm">
+              {% for p in priorities %}
+              <option value="{{ p }}" {% if ticket.priority == p %}selected{% endif %}>{{ p }}</option>
               {% endfor %}
             </select>
           </div>
@@ -3083,23 +3301,23 @@ TEMPLATES = {
     <input type="hidden" name="ticket_ids" id="bulkIds">
     <div id="bulkBar"
          class="d-none align-items-center gap-2 px-3 py-2 bg-light border-bottom flex-wrap">
-      <span class="fw-semibold text-muted small me-1" id="selCount">0 selected</span>
+      <span class="fw-semibold text-muted small me-1" id="selCount">{{ t('sel_count_zero') }}</span>
 
       <select name="action" id="bulkAction" class="form-select form-select-sm w-auto">
-        <option value="">— Choose Action —</option>
-        <option value="close">Close</option>
-        <option value="change_status">Change Status</option>
-        <option value="assign">Assign To</option>
+        <option value="">{{ t('choose_action') }}</option>
+        <option value="close">{{ t('closed') }}</option>
+        <option value="change_status">{{ t('change_status') }}</option>
+        <option value="assign">{{ t('assign_to') }}</option>
       </select>
 
       <select name="new_status" id="bulkStatus"
               class="form-select form-select-sm w-auto d-none">
-        <option value="Open">Open</option>
-        <option value="In Progress">In Progress</option>
-        <option value="Waiting for Customer">Waiting for Customer</option>
-        <option value="Waiting for Vendor">Waiting for Vendor</option>
-        <option value="Resolved">Resolved</option>
-        <option value="Reopened">Reopened</option>
+        <option value="Open">{{ t('open') }}</option>
+        <option value="In Progress">{{ t('in_progress') }}</option>
+        <option value="Waiting for Customer">{{ t('waiting_customer') }}</option>
+        <option value="Waiting for Vendor">{{ t('waiting_vendor') }}</option>
+        <option value="Resolved">{{ t('resolved') }}</option>
+        <option value="Reopened">{{ t('reopened') }}</option>
       </select>
 
       <select name="assigned_to" id="bulkAssign"
@@ -3110,9 +3328,9 @@ TEMPLATES = {
       </select>
 
       <button type="submit" class="btn btn-sm btn-primary px-3"
-              onclick="prepareBulk()">Apply</button>
+              onclick="prepareBulk()">{{ t('apply') }}</button>
       <button type="button" class="btn btn-sm btn-outline-secondary"
-              onclick="clearBulk()">Clear</button>
+              onclick="clearBulk()">{{ t('clear') }}</button>
     </div>
   </form>
   <!-- ─────────────────────────────────────────────────────────────── -->
@@ -3824,13 +4042,13 @@ input, textarea, select {
     <table class="table table-hover align-middle">
       <thead class="table-light">
         <tr>
-          <th>Ticket #</th>
-          <th>Title</th>
-          <th>Type</th>
-          <th>Priority</th>
-          <th>Status</th>
-          <th>Deleted At</th>
-          <th>Action</th>
+          <th>{{ t('ticket_number') }}</th>
+          <th>{{ t('title') }}</th>
+          <th>{{ t('type') }}</th>
+          <th>{{ t('priority') }}</th>
+          <th>{{ t('status') }}</th>
+          <th>{{ t('deleted_at_col') }}</th>
+          <th>{{ t('actions') }}</th>
         </tr>
       </thead>
       <tbody>
@@ -4569,13 +4787,13 @@ def run_setup():
 
         # Validation
         if not name or not email or not password:
-            flash("All fields are required", "danger")
+            flash(t("err_fields_required"), "danger")
         elif User.query.filter_by(email=email).first():
-            flash("Email is already in use", "danger")
+            flash(t("err_email_taken"), "danger")
         else:
             pw_errors = validate_password(password)
             if password != password2:
-                pw_errors.append("Passwords do not match")
+                pw_errors.append(t("err_pw_no_match"))
             if pw_errors:
                 for err in pw_errors:
                     flash(err, "danger")
@@ -4598,7 +4816,7 @@ def run_setup():
                 db.session.add(admin)
                 db.session.commit()
 
-                flash(f"Welcome {name}! Account created successfully. Please log in.", "success")
+                flash(t("flash_welcome", name=name), "success")
                 return redirect(url_for("auth.login"))
 
     return render_template_string(TEMPLATES["templates/setup.html"], form=form)
@@ -4678,15 +4896,16 @@ def forgot_password():
                 body_html=body_html,
             )
             if sent:
-                flash("Password reset link has been sent to your email.", "info")
+                flash(t("flash_reset_sent"), "info")
             else:
-                # Fallback: show link in flash when SMTP is not configured
-                flash(
-                    f"Password reset link (SMTP not configured — copy this): {reset_url}",
-                    "info",
+                # SMTP not configured — log the reset URL server-side for admin use,
+                # but never expose the token in the UI (security risk).
+                app.logger.warning(
+                    f"[PasswordReset] SMTP not configured — reset URL for {user.email}: {reset_url}"
                 )
+                flash(t("flash_reset_no_smtp"), "warning")
         else:
-            flash("If that email exists in our system, a reset link has been sent.", "info")
+            flash(t("flash_reset_fallback"), "info")
         return redirect(url_for("auth.login"))
     return render_template_string(TEMPLATES["templates/forgot_password.html"], form=EmptyForm())
 
@@ -4697,12 +4916,12 @@ def forgot_password():
 def reset_password(token):
     email = verify_reset_token(token)
     if not email:
-        flash("The password reset link is invalid or has expired (1 hour limit).", "danger")
+        flash(t("err_reset_invalid"), "danger")
         return redirect(url_for("auth.forgot_password"))
 
     user = User.query.filter_by(email=email).first()
     if not user:
-        flash("User not found.", "danger")
+        flash(t("err_user_not_found"), "danger")
         return redirect(url_for("auth.login"))
 
     if request.method == "POST":
@@ -4711,7 +4930,7 @@ def reset_password(token):
 
         errors = validate_password(password)
         if password != password2:
-            errors.append("Passwords do not match")
+            errors.append(t("err_pw_no_match"))
 
         if errors:
             for err in errors:
@@ -4720,7 +4939,7 @@ def reset_password(token):
 
         user.set_password(password)
         db.session.commit()
-        flash("Password updated successfully. Please log in.", "success")
+        flash(t("flash_pw_updated"), "success")
         return redirect(url_for("auth.login"))
 
     return render_template_string(TEMPLATES["templates/reset_password.html"], form=EmptyForm(), token=token)
@@ -4763,7 +4982,7 @@ def dashboard():
     if current_user.role in ("admin", "manager"):
         return redirect(url_for("admin.overview"))
 
-    # Base query — reused for both stats (COUNT) and paginated display.
+    # Base query — tickets this employee created.
     # COUNT queries are far cheaper than loading all rows when a user has many tickets.
     base_q = Ticket.query.filter_by(created_by=current_user.id, is_deleted=False)
 
@@ -4779,13 +4998,28 @@ def dashboard():
         page=page, per_page=20, error_out=False
     )
 
-    # Recent activity — only history entries for tickets owned by this employee.
-    # Actions limited to what employees are allowed to see (no internal reassign events).
+    # Tickets assigned TO this employee (created by someone else).
+    # Paginated separately — employee may be both creator and assignee on other tickets.
+    apage           = request.args.get("apage", 1, type=int)
+    assigned_tickets = (
+        Ticket.query
+        .filter(
+            Ticket.assigned_to == current_user.id,
+            Ticket.is_deleted  == False,
+        )
+        .order_by(Ticket.created_at.desc())
+        .paginate(page=apage, per_page=20, error_out=False)
+    )
+
+    # Recent activity — history entries for tickets owned or assigned to this employee.
     visible_history = (
         TicketHistory.query
         .join(Ticket, Ticket.id == TicketHistory.ticket_id)
         .filter(
-            Ticket.created_by   == current_user.id,
+            db.or_(
+                Ticket.created_by  == current_user.id,
+                Ticket.assigned_to == current_user.id,
+            ),
             Ticket.is_deleted   == False,
             TicketHistory.action.in_(["created", "status_change", "comment_added", "attachment_uploaded"]),
         )
@@ -4800,6 +5034,7 @@ def dashboard():
 
     return render_template_string(TEMPLATES["templates/dashboard_employee.html"],
                                   tickets=tickets, stats=stats,
+                                  assigned_tickets=assigned_tickets,
                                   visible_history=visible_history)
 
 @main_bp.route("/notifications")
@@ -4976,7 +5211,7 @@ def new_ticket():
 
         # Priority is forced to "Low" for employees — only validate for admin/manager
         if current_user.role in ("admin", "manager") and raw_priority not in PRIORITIES:
-            flash("Invalid priority value.", "danger")
+            flash(t("err_invalid_priority"), "danger")
             return render_template_string(
                 TEMPLATES["templates/new_ticket.html"],
                 form=form, departments=departments,
@@ -4998,7 +5233,7 @@ def new_ticket():
         _title_val = request.form.get("title", "").strip()
         _desc_val  = request.form.get("description", "").strip()
         if not _title_val:
-            flash("Title cannot be empty.", "danger")
+            flash(t("err_title_empty"), "danger")
             return render_template_string(
                 TEMPLATES["templates/new_ticket.html"],
                 form=form, departments=departments,
@@ -5007,7 +5242,7 @@ def new_ticket():
                 priorities=PRIORITIES,
             )
         if not _desc_val:
-            flash("Description cannot be empty.", "danger")
+            flash(t("err_desc_empty"), "danger")
             return render_template_string(
                 TEMPLATES["templates/new_ticket.html"],
                 form=form, departments=departments,
@@ -5036,12 +5271,19 @@ def new_ticket():
                 break                # success — exit retry loop
             except _IntegrityError:
                 db.session.rollback()
+                # expunge only the failed ticket — expunge_all() is unsafe in
+                # threaded contexts as it evicts objects owned by other threads
+                try:
+                    if ticket is not None:
+                        db.session.expunge(ticket)
+                except Exception:
+                    pass
                 ticket = None
                 continue             # regenerate and try again
         else:
             # Extremely unlikely (5 concurrent collisions in a row)
             app.logger.error("Failed to generate unique ticket_number after 5 attempts.")
-            flash("Could not create ticket — please try again.", "danger")
+            flash(t("err_ticket_create"), "danger")
             return render_template_string(
                 TEMPLATES["templates/new_ticket.html"],
                 form=form, departments=departments,
@@ -5126,7 +5368,7 @@ def ticket_detail(ticket_id):
 
     return render_template_string(TEMPLATES["templates/ticket_detail.html"],
                                   ticket=ticket, form=form, agents=agents,
-                                  statuses=STATUSES, visible_history=visible_history)
+                                  statuses=STATUSES, priorities=PRIORITIES, visible_history=visible_history)
 
 @employee_bp.route("/<int:ticket_id>/comment", methods=["POST"])
 @login_required
@@ -5240,7 +5482,7 @@ def upload_attachment(ticket_id):
        ticket.assigned_to != current_user.id:
         abort(403)
     if ticket.status == "Closed":
-        flash("Cannot add attachments to a closed ticket", "warning")
+        flash(t("err_attach_closed"), "warning")
         return redirect(url_for("employee.ticket_detail", ticket_id=ticket_id))
 
     form = EmptyForm()
@@ -5281,8 +5523,10 @@ def download_attachment(attachment_id):
     if not ticket or ticket.is_deleted:
         abort(404)
 
-    # Access control
-    if current_user.role == "employee" and ticket.created_by != current_user.id:
+    # Access control — employee can download if they created OR are assigned to the ticket
+    if (current_user.role == "employee"
+            and ticket.created_by != current_user.id
+            and ticket.assigned_to != current_user.id):
         abort(403)
 
     import io
@@ -5307,7 +5551,7 @@ def download_attachment(attachment_id):
                 download_name=att.original_name,
             )
 
-    flash("File not found", "danger")
+    flash(t("err_file_not_found"), "danger")
     return redirect(url_for("employee.ticket_detail", ticket_id=ticket.id))
 
 
@@ -5326,7 +5570,7 @@ def reopen_ticket(ticket_id):
 
     form = EmptyForm()
     if not form.validate_on_submit():
-        flash("Invalid request. Please try again.", "danger")
+        flash(t("err_invalid_request"), "danger")
         return redirect(url_for("employee.ticket_detail", ticket_id=ticket_id))
 
     if ticket.status not in ("Resolved", "Closed"):
@@ -5501,10 +5745,11 @@ def update_ticket(ticket_id):
     if form.validate_on_submit():
         new_status   = request.form.get("status")
         new_assigned = request.form.get("assigned_to") or None
+        new_priority = request.form.get("priority")
 
         # Fix TC-044: validate new_status against whitelist — reject unknown/injected values
         if new_status and new_status not in STATUSES:
-            flash("Invalid status value.", "danger")
+            flash(t("err_invalid_status"), "danger")
             return redirect(url_for("employee.ticket_detail", ticket_id=ticket_id))
 
         if new_status and new_status != ticket.status:
@@ -5516,16 +5761,25 @@ def update_ticket(ticket_id):
                               event=_ev)
             ticket.status = new_status
 
+        # Fix: validate and apply priority change
+        if new_priority and new_priority not in PRIORITIES:
+            flash(t("err_invalid_priority"), "danger")
+            return redirect(url_for("employee.ticket_detail", ticket_id=ticket_id))
+
+        if new_priority and new_priority != ticket.priority:
+            write_history(ticket, "priority_change", ticket.priority, new_priority, current_user.id)
+            ticket.priority = new_priority
+
         if new_assigned and str(new_assigned) != str(ticket.assigned_to or ""):
             # Fix TC-051: validate assignee exists and is active before saving
             try:
                 assignee_id = int(new_assigned)
             except (ValueError, TypeError):
-                flash("Invalid assignee.", "danger")
+                flash(t("err_invalid_assignee"), "danger")
                 return redirect(url_for("employee.ticket_detail", ticket_id=ticket_id))
             new_user = db.session.get(User, assignee_id)
-            if not new_user or not new_user.active or new_user.role not in ("admin", "manager"):
-                flash("Selected assignee is not valid, inactive, or not an agent.", "danger")
+            if not new_user or not new_user.active or new_user.role not in ("admin", "manager", "employee"):
+                flash(t("err_assignee_inactive"), "danger")
                 return redirect(url_for("employee.ticket_detail", ticket_id=ticket_id))
             old_name = ticket.assignee.name if ticket.assignee else "Unassigned"
             write_history(ticket, "reassign", old_name, new_user.name, current_user.id)
@@ -5563,7 +5817,7 @@ def bulk_action():
     """
     form = EmptyForm()
     if not form.validate_on_submit():
-        flash("CSRF validation failed.", "danger")
+        flash(t("err_csrf"), "danger")
         return redirect(url_for("admin.tickets"))
 
     raw_ids = request.form.get("ticket_ids", "")
@@ -5575,7 +5829,7 @@ def bulk_action():
         ids = []
 
     if not ids:
-        flash("No tickets selected.", "warning")
+        flash(t("err_no_tickets_selected"), "warning")
         return redirect(url_for("admin.tickets"))
 
     tickets_q = Ticket.query.filter(Ticket.id.in_(ids), Ticket.is_deleted == False)
@@ -5584,7 +5838,7 @@ def bulk_action():
 
     tickets_list = tickets_q.all()
     if not tickets_list:
-        flash("No valid tickets found.", "warning")
+        flash(t("err_no_valid_tickets"), "warning")
         return redirect(url_for("admin.tickets"))
 
     updated = 0
@@ -5595,7 +5849,7 @@ def bulk_action():
             new_uid = request.form.get("assigned_to", "")
             if new_uid.isdigit():
                 new_user = db.session.get(User, int(new_uid))
-                if new_user and new_user.active and new_user.role in ("admin", "manager"):
+                if new_user and new_user.active and new_user.role in ("admin", "manager", "employee"):
                     old_name = ticket.assignee.name if ticket.assignee else "Unassigned"
                     write_history(ticket, "reassign", old_name, new_user.name, current_user.id)
                     ticket.assigned_to = new_user.id
@@ -5631,7 +5885,7 @@ def bulk_action():
             ticket.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     db.session.commit()
-    flash(f"Bulk action applied to {updated} ticket(s).", "success")
+    flash(t("flash_bulk_done", count=updated), "success")
     return redirect(url_for("admin.tickets"))
 
 
@@ -5695,7 +5949,7 @@ def restore_ticket(ticket_id):
     ticket.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
     write_history(ticket, "status_change", "Deleted", ticket.status, current_user.id)
     db.session.commit()
-    flash(f"Ticket [{ticket.ticket_number}] restored successfully.", "success")
+    flash(t("flash_ticket_restored", num=ticket.ticket_number), "success")
     return redirect(url_for("admin.deleted_tickets"))
 
 
@@ -5881,8 +6135,7 @@ def export_reports():
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
     except ImportError:
-        flash("مكتبة openpyxl غير مثبتة. قم بتشغيل: pip install openpyxl" if get_lang() == "ar" else
-              "openpyxl is not installed. Run: pip install openpyxl", "danger")
+        flash(t("err_openpyxl"), "danger")
         return redirect(url_for("admin.reports"))
     from sqlalchemy import func, case
 
@@ -6192,7 +6445,7 @@ def search():
                         db.func.coalesce(Comment.body, "")
                     ).op("@@")(tsq)
                 )
-                .subquery()
+                .scalar_subquery()
             )
             base_query = base_query.filter(
                 db.or_(
@@ -6211,7 +6464,7 @@ def search():
             matching_comment_ids = (
                 db.session.query(Comment.ticket_id)
                 .filter(Comment.body.ilike(term))
-                .subquery()
+                .scalar_subquery()
             )
             base_query = base_query.filter(
                 db.or_(
@@ -6262,9 +6515,9 @@ def new_user():
         else:
             errors.extend(validate_password(password))
             if password != password2:
-                errors.append("Passwords do not match")
+                errors.append(t("err_pw_no_match"))
         if email and User.query.filter_by(email=email).first():
-            errors.append("Email is already in use")
+            errors.append(t("err_email_taken"))
         if username:
             uname_err = validate_username(username)
             if uname_err:
@@ -6272,7 +6525,7 @@ def new_user():
             elif User.query.filter(
                 db.func.lower(User.username) == username.lower()
             ).first():
-                errors.append("Username is already taken")
+                errors.append(t("err_username_taken"))
         if errors:
             for err in errors:
                 flash(err, "danger")
@@ -6377,14 +6630,14 @@ def edit_user(user_id):
         # Email uniqueness check (skip if unchanged)
         if new_email and new_email != u.email:
             if User.query.filter_by(email=new_email).first():
-                errors.append("Email is already in use")
+                errors.append(t("err_email_taken"))
         # Username format + uniqueness check (skip if unchanged)
         if new_username and new_username != u.username:
             uname_err = validate_username(new_username)
             if uname_err:
                 errors.append(uname_err)
             elif User.query.filter(db.func.lower(User.username) == new_username.lower()).first():
-                errors.append("Username is already taken")
+                errors.append(t("err_username_taken"))
         if errors:
             for err in errors:
                 flash(err, "danger")
@@ -6551,7 +6804,7 @@ def new_department():
     manager_id = request.form.get("manager_id") or None
 
     if not name:
-        flash("Department name is required.", "danger")
+        flash(t("err_dept_name_required"), "danger")
         return redirect(url_for("admin.departments"))
 
     # Uniqueness check (case-insensitive, ignore soft-deleted)
@@ -6593,7 +6846,7 @@ def edit_department():
     manager_id = request.form.get("manager_id") or None
 
     if not dept_id or not name:
-        flash("Invalid request.", "danger")
+        flash(t("err_invalid_request"), "danger")
         return redirect(url_for("admin.departments"))
 
     dept = db.session.get(Department, int(dept_id))
@@ -6665,7 +6918,7 @@ def restore_department(dept_id):
     dept.is_deleted = False
     dept.deleted_at = None
     db.session.commit()
-    flash(f"Department '{dept.name}' restored.", "success")
+    flash(t("flash_dept_restored", name=dept.name), "success")
     return redirect(url_for("admin.departments"))
 
 
@@ -6809,19 +7062,26 @@ def dept_employees_by_select():
     HTMX does not follow redirects automatically — redirecting caused empty
     options in some browsers.
     """
+    lang         = flask_session.get("lang", "en")
+    translations = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
+
     dept_id = request.args.get("department_id")
     if not dept_id:
-        return '<option value="">-- Select Department First --</option>'
+        placeholder = translations.get("choose_dept_first", "-- Choose Department First --")
+        return f'<option value="">{placeholder}</option>'
     try:
         dept_id = int(dept_id)
     except (ValueError, TypeError):
-        return '<option value="">-- Invalid Department --</option>'
+        placeholder = translations.get("choose_dept_first", "-- Choose Department First --")
+        return f'<option value="">{placeholder}</option>'
     users = User.query.filter_by(
         department_id=dept_id, active=True
     ).filter(User.role.in_(["admin", "manager"])).all()
     if not users:
-        return '<option value="">-- No agents in this department --</option>'
-    options = '<option value="">-- Select Assignee --</option>'
+        placeholder = translations.get("no_agents_in_dept", "-- No agents in this department --")
+        return f'<option value="">{placeholder}</option>'
+    placeholder = translations.get("choose_assignee", "-- Select Assignee --")
+    options = f'<option value="">{placeholder}</option>'
     options += "".join(f'<option value="{u.id}">{u.name}</option>' for u in users)
     return options
 
