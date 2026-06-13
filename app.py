@@ -1843,48 +1843,44 @@ if _scheduler_enabled and (os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not 
 
 def upload_to_gdrive(json_bytes: bytes, timestamp) -> Optional[str]:
     """
-    Upload a JSON backup to Google Drive using a Service Account.
+    Upload a JSON backup to Google Drive using OAuth2 refresh token.
     Returns the Google Drive file ID on success, or None if Drive is
     not configured or the upload fails (non-fatal — backup still saves
     to Neon regardless).
 
     Required environment variables:
-        GDRIVE_CREDENTIALS  — contents of the Service Account JSON key file
-        GDRIVE_FOLDER_ID    — ID of the shared Drive folder
+        GDRIVE_CLIENT_ID      — OAuth2 client ID
+        GDRIVE_CLIENT_SECRET  — OAuth2 client secret
+        GDRIVE_REFRESH_TOKEN  — OAuth2 refresh token
+        GDRIVE_FOLDER_ID      — ID of the target Drive folder
     """
-    import json as _json
-    creds_raw = os.environ.get("GDRIVE_CREDENTIALS")
-    folder_id = os.environ.get("GDRIVE_FOLDER_ID")
-    if not creds_raw or not folder_id:
+    folder_id     = os.environ.get("GDRIVE_FOLDER_ID")
+    client_id     = os.environ.get("GDRIVE_CLIENT_ID")
+    client_secret = os.environ.get("GDRIVE_CLIENT_SECRET")
+    refresh_token = os.environ.get("GDRIVE_REFRESH_TOKEN")
+    if not all([folder_id, client_id, client_secret, refresh_token]):
         return None          # Google Drive not configured — silently skip
     try:
         from googleapiclient.discovery import build
-        from google.oauth2 import service_account
+        from google.oauth2.credentials import Credentials
         from googleapiclient.http import MediaInMemoryUpload
 
-        creds = service_account.Credentials.from_service_account_info(
-            _json.loads(creds_raw),
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
             scopes=["https://www.googleapis.com/auth/drive"],
         )
         service  = build("drive", "v3", credentials=creds)
         filename = f"backup_{utc_to_local(timestamp).strftime('%Y%m%d_%H%M%S')}.json.gz"
         media    = MediaInMemoryUpload(json_bytes, mimetype="application/gzip")
-        # Upload to Service Account's own Drive first (no parent = no quota issue)
-        file_meta = {"name": filename}
+        file_meta = {"name": filename, "parents": [folder_id]}
         result = service.files().create(
             body=file_meta, media_body=media, fields="id"
         ).execute()
-        file_id = result.get("id")
-        # Then copy it into the target folder owned by the real user
-        service.files().copy(
-            fileId=file_id,
-            body={"name": filename, "parents": [folder_id]},
-            supportsAllDrives=True,
-            fields="id"
-        ).execute()
-        # Delete the original from Service Account's Drive
-        service.files().delete(fileId=file_id).execute()
-        return file_id
+        return result.get("id")
     except Exception as exc:
         app.logger.error(f"[Backup] Google Drive upload failed: {exc}")
         return None
