@@ -558,11 +558,14 @@ TRANSLATIONS = {
         "backup_size":           "Size (KB)",
         "backup_source":         "Source",
         "backup_email":          "Email",
+        "backup_drive":          "Drive",
         "backup_actions":        "Actions",
         "backup_source_auto":    "Auto",
         "backup_source_manual":  "Manual",
         "backup_email_sent":     "Sent ✓",
         "backup_email_none":     "Not sent",
+        "backup_drive_saved":    "Saved ✓",
+        "backup_drive_none":     "Not saved",
         "backup_download":       "Download",
         "backup_restore":        "Restore",
         "backup_confirm_restore":"Are you sure you want to restore this backup? ALL current data will be replaced.",
@@ -855,11 +858,14 @@ TRANSLATIONS = {
         "backup_size":           "الحجم (KB)",
         "backup_source":         "المصدر",
         "backup_email":          "البريد الإلكتروني",
+        "backup_drive":          "درايف",
         "backup_actions":        "الإجراءات",
         "backup_source_auto":    "تلقائي",
         "backup_source_manual":  "يدوي",
         "backup_email_sent":     "تم الإرسال ✓",
         "backup_email_none":     "لم يُرسل",
+        "backup_drive_saved":    "محفوظ ✓",
+        "backup_drive_none":     "لم يُحفظ",
         "backup_download":       "تحميل",
         "backup_restore":        "استعادة",
         "backup_confirm_restore":"هل أنت متأكد من استعادة هذه النسخة؟ ستُستبدل جميع البيانات الحالية.",
@@ -4712,6 +4718,7 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
           <th class="text-center">{{ t('backup_size') }}</th>
           <th class="text-center">{{ t('backup_source') }}</th>
           <th class="text-center">{{ t('backup_email') }}</th>
+          <th class="text-center">{{ t('backup_drive') }}</th>
           <th class="text-end">{{ t('backup_actions') }}</th>
         </tr>
       </thead>
@@ -4755,6 +4762,15 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
               {% endif %}
             </td>
 
+            {# Google Drive status #}
+            <td class="text-center">
+              {% if b.gdrive_id %}
+                <span class="text-success small"><i class="bi bi-google me-1"></i>{{ t('backup_drive_saved') }}</span>
+              {% else %}
+                <span class="text-muted small"><i class="bi bi-cloud-slash me-1"></i>{{ t('backup_drive_none') }}</span>
+              {% endif %}
+            </td>
+
             {# Actions #}
             <td class="text-end text-nowrap">
               {# Download #}
@@ -4770,8 +4786,8 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
                       title="{{ t('backup_restore') }}"
                       data-bs-toggle="modal"
                       data-bs-target="#restoreModal"
-                      data-backup-id="{{ b.id }}"
-                      data-backup-date="{{ b.created_at | localtime }}">
+                      data-backup-date="{{ b.created_at | localtime }}"
+                      data-restore-url="{{ url_for('admin.restore_backup', backup_id=b.id) }}">
                 <i class="bi bi-arrow-counterclockwise"></i>
               </button>
 
@@ -4781,8 +4797,8 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
                       title="{{ t('backup_delete') }}"
                       data-bs-toggle="modal"
                       data-bs-target="#deleteBackupModal"
-                      data-backup-id="{{ b.id }}"
-                      data-backup-date="{{ b.created_at | localtime }}">
+                      data-backup-date="{{ b.created_at | localtime }}"
+                      data-delete-url="{{ url_for('admin.delete_backup', backup_id=b.id) }}">
                 <i class="bi bi-trash"></i>
               </button>
             </td>
@@ -4790,7 +4806,7 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
           {% endfor %}
         {% else %}
           <tr>
-            <td colspan="6" class="text-center text-muted py-5">
+            <td colspan="7" class="text-center text-muted py-5">
               <i class="bi bi-cloud-slash fs-2 d-block mb-2 opacity-25"></i>
               {{ t('backup_no_records') }}
             </td>
@@ -4877,19 +4893,15 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
 <script>
 document.getElementById('restoreModal').addEventListener('show.bs.modal', function (e) {
   var btn = e.relatedTarget;
-  var id  = btn.getAttribute('data-backup-id');
   var dt  = btn.getAttribute('data-backup-date');
   document.getElementById('restoreDate').textContent = dt;
-  document.getElementById('restoreForm').action =
-    '/admin/backups/' + id + '/restore';
+  document.getElementById('restoreForm').action = btn.getAttribute('data-restore-url');
 });
 document.getElementById('deleteBackupModal').addEventListener('show.bs.modal', function (e) {
   var btn = e.relatedTarget;
-  var id  = btn.getAttribute('data-backup-id');
   var dt  = btn.getAttribute('data-backup-date');
   document.getElementById('deleteBackupDate').textContent = dt;
-  document.getElementById('deleteBackupForm').action =
-    '/admin/backups/' + id + '/delete';
+  document.getElementById('deleteBackupForm').action = btn.getAttribute('data-delete-url');
 });
 </script>
 
@@ -7177,8 +7189,26 @@ def restore_department(dept_id):
 @admin_bp.route("/backups")
 @admin_required
 def backups_list():
-    """Show all backup snapshots, newest first."""
-    backups = Backup.query.order_by(Backup.created_at.desc()).all()
+    """Show all backup snapshots, newest first.
+
+    Selects only the columns the listing page actually needs — intentionally
+    excludes the large ``data`` TEXT column (full JSON snapshot) so that
+    browsing the backup list never pulls megabytes of JSON into memory for
+    every row.  The ``data`` column is only read by restore_from_backup() and
+    download_backup(), which fetch a single record by PK.
+    """
+    backups = (
+        db.session.query(
+            Backup.id,
+            Backup.created_at,
+            Backup.size_kb,
+            Backup.source,
+            Backup.email_sent,
+            Backup.gdrive_id,
+        )
+        .order_by(Backup.created_at.desc())
+        .all()
+    )
     return render_template_string(
         TEMPLATES["templates/backups.html"],
         backups=backups,
