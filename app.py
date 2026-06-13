@@ -1374,8 +1374,9 @@ class Attachment(db.Model):
     original_name = db.Column(db.String(255), nullable=False)     # shown to users
     file_size     = db.Column(db.Integer, nullable=False)
     mime_type     = db.Column(db.String(100), nullable=False)
-    file_data     = db.Column(db.LargeBinary, nullable=True)      # file bytes stored in Neon (Railway deployment)
-    created_at    = db.Column(db.DateTime, default=lambda: utc_now())
+    file_data      = db.Column(db.LargeBinary, nullable=True)     # file bytes stored in Neon (legacy / Drive fallback)
+    gdrive_file_id = db.Column(db.String(100), nullable=True)     # Google Drive file ID (primary storage)
+    created_at     = db.Column(db.DateTime, default=lambda: utc_now())
 
     ticket   = db.relationship("Ticket", back_populates="attachments")
     uploader = db.relationship("User")
@@ -1903,6 +1904,81 @@ def upload_to_gdrive(json_bytes: bytes, timestamp) -> Optional[str]:
         return result.get("id")
     except Exception as exc:
         app.logger.error(f"[Backup] Google Drive upload failed: {exc}")
+        return None
+
+
+def upload_attachment_to_gdrive(file_bytes: bytes, original_name: str, mime_type: str) -> Optional[str]:
+    """
+    Upload a ticket attachment to Google Drive.
+    Returns the Drive file ID on success, or None if Drive is not configured or upload fails.
+    Reuses the same OAuth2 credentials as the backup function.
+    Uses GDRIVE_ATTACHMENTS_FOLDER_ID if set, falls back to GDRIVE_FOLDER_ID.
+    """
+    client_id     = os.environ.get("GDRIVE_CLIENT_ID")
+    client_secret = os.environ.get("GDRIVE_CLIENT_SECRET")
+    refresh_token = os.environ.get("GDRIVE_REFRESH_TOKEN")
+    folder_id     = os.environ.get("GDRIVE_ATTACHMENTS_FOLDER_ID") or os.environ.get("GDRIVE_FOLDER_ID")
+    if not all([folder_id, client_id, client_secret, refresh_token]):
+        return None   # Drive not configured — fall back to DB storage silently
+    try:
+        from googleapiclient.discovery import build
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.http import MediaInMemoryUpload
+
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        service   = build("drive", "v3", credentials=creds)
+        media     = MediaInMemoryUpload(file_bytes, mimetype=mime_type)
+        file_meta = {"name": original_name, "parents": [folder_id]}
+        result    = service.files().create(
+            body=file_meta, media_body=media, fields="id"
+        ).execute()
+        return result.get("id")
+    except Exception as exc:
+        app.logger.error(f"[Attachment] Google Drive upload failed: {exc}")
+        return None
+
+
+def download_from_gdrive(file_id: str) -> Optional[bytes]:
+    """
+    Download a file from Google Drive by file ID.
+    Returns raw bytes on success, or None on failure.
+    """
+    client_id     = os.environ.get("GDRIVE_CLIENT_ID")
+    client_secret = os.environ.get("GDRIVE_CLIENT_SECRET")
+    refresh_token = os.environ.get("GDRIVE_REFRESH_TOKEN")
+    if not all([client_id, client_secret, refresh_token]):
+        return None
+    try:
+        from googleapiclient.discovery import build
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.http import MediaIoBaseDownload
+        import io as _io
+
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        service    = build("drive", "v3", credentials=creds)
+        request    = service.files().get_media(fileId=file_id)
+        buf        = _io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return buf.getvalue()
+    except Exception as exc:
+        app.logger.error(f"[Attachment] Google Drive download failed for {file_id}: {exc}")
         return None
 
 
@@ -5759,15 +5835,18 @@ def _save_attachment(file_storage, ticket):
         return None, t("file_type_not_allowed")
     # ─────────────────────────────────────────────────────────────────────
 
-    # Store file bytes in the database (Railway has no persistent disk)
+    # Try Google Drive first; fall back to database storage if Drive is not configured or fails
+    safe_name  = secure_filename(original_name)
+    gdrive_id  = upload_attachment_to_gdrive(file_bytes, safe_name, detected_mime)
     attachment = Attachment(
-        ticket_id     = ticket.id,
-        uploaded_by   = current_user.id,
-        filename      = None,
-        original_name = secure_filename(original_name),
-        file_size     = len(file_bytes),
-        mime_type     = detected_mime,
-        file_data     = file_bytes,
+        ticket_id      = ticket.id,
+        uploaded_by    = current_user.id,
+        filename       = None,
+        original_name  = safe_name,
+        file_size      = len(file_bytes),
+        mime_type      = detected_mime,
+        gdrive_file_id = gdrive_id,
+        file_data      = None if gdrive_id else file_bytes,  # store in DB only if Drive unavailable
     )
     db.session.add(attachment)
     return attachment, None
@@ -5835,7 +5914,18 @@ def download_attachment(attachment_id):
 
     import io
 
-    # Primary: file stored in database (Railway deployment)
+    # 1. Google Drive (primary — new uploads)
+    if att.gdrive_file_id:
+        file_bytes = download_from_gdrive(att.gdrive_file_id)
+        if file_bytes:
+            return send_file(
+                io.BytesIO(file_bytes),
+                mimetype=att.mime_type,
+                as_attachment=True,
+                download_name=att.original_name,
+            )
+
+    # 2. Database storage (legacy — uploaded before Drive integration)
     if att.file_data is not None:
         return send_file(
             io.BytesIO(att.file_data),
@@ -5844,7 +5934,7 @@ def download_attachment(attachment_id):
             download_name=att.original_name,
         )
 
-    # Fallback: file stored on disk (legacy / non-Railway deployments)
+    # 3. Disk storage (old legacy — local deployments)
     if att.filename:
         disk_path = os.path.join(_get_upload_folder(), att.filename)
         if os.path.exists(disk_path):
@@ -7628,7 +7718,8 @@ def ensure_columns():
         ("users",       "on_leave",            "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 0"),
         ("users",       "is_available",        "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 1"),
         ("users",       "password_changed_at", "TIMESTAMP",        "TEXT",             None),
-        ("attachments", "file_data",           "BYTEA",            "BLOB",             None),  # Railway DB storage
+        ("attachments", "file_data",           "BYTEA",            "BLOB",             None),  # Railway DB storage (legacy)
+        ("attachments", "gdrive_file_id",     "VARCHAR(100)",     "TEXT",             None),  # Google Drive file ID
         ("backups",     "email_sent",          "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 0"),
     ]
     with app.app_context():
