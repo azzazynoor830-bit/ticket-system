@@ -1830,9 +1830,54 @@ def check_waiting_for_customer_reminders():
             app.logger.info(f"Waiting-for-customer reminders sent: {reminded}")
 
 
+def archive_old_notifications():
+    """
+    Scheduler job — runs nightly at 02:00.
+    Marks notifications older than NOTIFICATION_ARCHIVE_DAYS days as read so the
+    bell badge and the notifications panel don't fill up indefinitely.
+
+    The threshold is controlled by the NOTIFICATION_ARCHIVE_DAYS environment
+    variable (default: 30 days) so it can be tuned per deployment without a
+    code change.
+
+    Only unread notifications are touched; already-read ones are left alone
+    (they carry no UI weight).  A single bulk UPDATE is used instead of
+    loading ORM objects to keep the DB round-trip cheap even with thousands
+    of rows.
+    """
+    days = int(os.environ.get("NOTIFICATION_ARCHIVE_DAYS", "30"))
+    cutoff = utc_now() - timedelta(days=days)
+    try:
+        with app.app_context():
+            result = db.session.execute(
+                db.text(
+                    "UPDATE notifications SET is_read = TRUE "
+                    "WHERE is_read = FALSE AND created_at < :cutoff"
+                ),
+                {"cutoff": cutoff},
+            )
+            db.session.commit()
+            count = result.rowcount
+            if count:
+                app.logger.info(
+                    f"[Notifications] Archived {count} unread notification(s) "
+                    f"older than {days} days (cutoff={cutoff.date()})"
+                )
+    except Exception as exc:
+        app.logger.error(f"[Notifications] archive_old_notifications failed: {exc}")
+        db.session.rollback()
+
+
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(check_sla_breaches, "interval", minutes=10, id="sla_check")
 scheduler.add_job(check_waiting_for_customer_reminders, "interval", hours=6, id="wfc_reminder")
+scheduler.add_job(
+    func=archive_old_notifications,
+    trigger="cron",
+    hour=2, minute=0,
+    id="archive_notifications",
+    replace_existing=True,
+)
 scheduler.add_job(
     func=lambda: create_backup(source="auto"),
     trigger="cron",
@@ -2095,6 +2140,11 @@ def create_backup(source: str = "auto") -> Backup | None:
                         # every download would return "File not found".
                         "file_data_b64": __import__("base64").b64encode(a.file_data).decode("ascii")
                                          if a.file_data is not None else None,
+                        # Google Drive file ID — required so restore_from_backup can
+                        # re-link the attachment to its Drive file.  Without this field
+                        # every restore loses the Drive reference and download falls back
+                        # to file_data (which is NULL for Drive-backed attachments).
+                        "gdrive_file_id": a.gdrive_file_id,
                     }
                     for a in Attachment.query.all()
                 ],
@@ -2400,9 +2450,9 @@ def restore_from_backup(backup: Backup) -> None:
             file_bytes = _b64.b64decode(raw_b64) if raw_b64 is not None else None
             db.session.execute(db.text(
                 "INSERT INTO attachments "
-                "(id, ticket_id, uploaded_by, filename, original_name, file_size, mime_type, created_at, file_data) "
+                "(id, ticket_id, uploaded_by, filename, original_name, file_size, mime_type, created_at, file_data, gdrive_file_id) "
                 "VALUES "
-                "(:id, :ticket_id, :uploaded_by, :filename, :original_name, :file_size, :mime_type, :created_at, :file_data)"
+                "(:id, :ticket_id, :uploaded_by, :filename, :original_name, :file_size, :mime_type, :created_at, :file_data, :gdrive_file_id)"
             ), {
                 "id":            a["id"],
                 "ticket_id":     a["ticket_id"],
@@ -2413,6 +2463,9 @@ def restore_from_backup(backup: Backup) -> None:
                 "mime_type":     a["mime_type"],
                 "created_at":    a.get("created_at"),
                 "file_data":     file_bytes,
+                # Backups created before this fix won't have "gdrive_file_id";
+                # default to None (legacy behaviour — download falls back to file_data).
+                "gdrive_file_id": a.get("gdrive_file_id"),
             })
 
         # 8. Notifications
@@ -5924,6 +5977,12 @@ def download_attachment(attachment_id):
                 as_attachment=True,
                 download_name=att.original_name,
             )
+        # Drive call returned None — token expired, quota exceeded, or file deleted.
+        # Log clearly so ops can diagnose, then fall through to DB / disk fallbacks.
+        app.logger.warning(
+            f"[Attachment] Drive download failed for attachment id={att.id} "
+            f"gdrive_file_id={att.gdrive_file_id!r} — falling back to local storage"
+        )
 
     # 2. Database storage (legacy — uploaded before Drive integration)
     if att.file_data is not None:
@@ -7635,6 +7694,44 @@ app.register_blueprint(main_bp)
 app.register_blueprint(employee_bp)
 app.register_blueprint(admin_bp)
 app.register_blueprint(api_bp)
+
+
+# ─────────────────────────────────────────────
+# HEALTH CHECK
+# ─────────────────────────────────────────────
+
+@app.route("/health")
+def health_check():
+    """
+    Lightweight liveness probe used by Railway, Docker, and load-balancers.
+    Returns 200 when the app process is alive and the DB is reachable.
+    Returns 503 when the DB check fails so the platform can restart the dyno.
+    No authentication required — this endpoint must be reachable without a session.
+    """
+    import time
+    from flask import jsonify as _jsonify
+    start = time.monotonic()
+    try:
+        # Cheapest possible DB round-trip — no table scan, no locks.
+        db.session.execute(db.text("SELECT 1"))
+        db_ok = True
+        db_error = None
+    except Exception as exc:
+        db_ok = False
+        db_error = str(exc)
+        app.logger.error(f"[Health] DB check failed: {exc}")
+    elapsed_ms = round((time.monotonic() - start) * 1000, 1)
+
+    payload = {
+        "status": "ok" if db_ok else "degraded",
+        "db": "ok" if db_ok else "error",
+        "elapsed_ms": elapsed_ms,
+    }
+    if db_error:
+        payload["db_error"] = db_error
+
+    status_code = 200 if db_ok else 503
+    return _jsonify(payload), status_code
 
 
 # ─────────────────────────────────────────────
