@@ -10,6 +10,15 @@ import threading
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+# ── Timezone support (zoneinfo — stdlib since Python 3.9) ────────────────────
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    try:
+        from backports.zoneinfo import ZoneInfo   # pip install backports.zoneinfo
+    except ImportError:
+        ZoneInfo = None   # fallback: UTC-only mode, no conversion
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
@@ -107,6 +116,14 @@ class BaseConfig:
     #   APP_BASE_URL=https://ticket-system-production.up.railway.app
     # Without this, SLA-breach and assignment emails contain http://localhost links.
     APP_BASE_URL = os.environ.get("APP_BASE_URL", "")
+
+    # ── Timezone for display & business-hours SLA calculation ────────────────
+    # Railway servers always run in UTC.  Set APP_TIMEZONE to the IANA timezone
+    # name matching the client's location so dates/times display correctly and
+    # SLA business-hours windows are evaluated in local time rather than UTC.
+    # Example values: "Africa/Cairo"  "Asia/Riyadh"  "Europe/London"
+    # Default: "Africa/Cairo" (UTC+2/+3 — Egypt standard / daylight time).
+    APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "Africa/Cairo")
 
 
 class DevelopmentConfig(BaseConfig):
@@ -217,7 +234,7 @@ def get_reset_serializer():
 def generate_reset_token(email):
     s = get_reset_serializer()
     # Embed issued_at so we can compare against password_changed_at on verification
-    payload = {"email": email, "iat": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
+    payload = {"email": email, "iat": utc_now().isoformat()}
     return s.dumps(payload, salt="password-reset")
 
 def verify_reset_token(token, expiration=3600):
@@ -928,6 +945,98 @@ def from_json_filter(value):
     except (ValueError, TypeError):
         return []
 
+
+# ── Timezone helpers ──────────────────────────────────────────────────────
+# All datetimes stored in the DB are naive UTC (tzinfo stripped intentionally
+# to stay compatible with both PostgreSQL and SQLite).
+# These helpers convert between UTC-naive and the app's configured local tz.
+
+def _get_app_tz():
+    """
+    Return a ZoneInfo object for the configured APP_TIMEZONE.
+    Falls back to UTC if zoneinfo is unavailable or the tz name is invalid.
+    """
+    tz_name = app.config.get("APP_TIMEZONE", "Africa/Cairo")
+    if ZoneInfo is None:
+        return timezone.utc
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        app.logger.warning(
+            f"[TZ] Invalid APP_TIMEZONE={tz_name!r} — falling back to UTC."
+        )
+        return timezone.utc
+
+
+def utc_now() -> datetime:
+    """
+    Return the current time as a naive UTC datetime (tzinfo=None).
+    This is the canonical source of 'now' for all DB writes — replaces the
+    scattered utc_now() calls.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utc_to_local(dt: datetime) -> datetime:
+    """
+    Convert a naive UTC datetime (as stored in DB) to a naive local datetime
+    in the app's configured timezone — used for display only.
+    Returns dt unchanged if conversion fails.
+    """
+    if dt is None:
+        return dt
+    tz = _get_app_tz()
+    if tz is timezone.utc:
+        return dt   # no conversion needed
+    try:
+        return dt.replace(tzinfo=timezone.utc).astimezone(tz).replace(tzinfo=None)
+    except Exception:
+        return dt
+
+
+def local_now() -> datetime:
+    """
+    Return the current time as a naive datetime in the app's local timezone.
+    Used for display strings (e.g. report timestamps, backup filenames).
+    """
+    return utc_to_local(utc_now())
+
+
+def local_to_utc(dt: datetime) -> datetime:
+    """
+    Convert a naive local datetime back to a naive UTC datetime.
+    Used by add_business_hours() to ensure SLA calculation runs in local time.
+    """
+    if dt is None:
+        return dt
+    tz = _get_app_tz()
+    if tz is timezone.utc:
+        return dt
+    try:
+        return dt.replace(tzinfo=tz).astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:
+        return dt
+
+
+@app.template_filter("localtime")
+def localtime_filter(dt, fmt="%Y-%m-%d %H:%M"):
+    """
+    Jinja2 filter: convert a naive UTC datetime (DB-stored) to the app's
+    local timezone and return a formatted string.
+
+    Usage in templates (replaces all .strftime() calls on datetime columns):
+        {{ ticket.created_at | localtime }}
+        {{ ticket.created_at | localtime('%Y-%m-%d') }}
+        {{ ticket.sla_deadline | localtime }}
+    """
+    if dt is None:
+        return "—"
+    local_dt = utc_to_local(dt)
+    try:
+        return local_dt.strftime(fmt)
+    except Exception:
+        return str(dt)
+
 # ── Jinja2 context processor: expose t() and lang to all templates ────────
 @app.context_processor
 def inject_i18n():
@@ -968,7 +1077,7 @@ class Department(db.Model):
     )
     is_deleted = db.Column(db.Boolean, default=False, nullable=False)
     deleted_at = db.Column(db.DateTime, nullable=True)
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at = db.Column(db.DateTime, default=lambda: utc_now())
     # JSON-encoded list of allowed ticket types, e.g. '["IT Support","General"]'
     # NULL means all types are allowed (backward-compatible default)
     # NEW FIELD — run: flask db migrate -m "dept allowed_types" && flask db upgrade
@@ -1002,7 +1111,7 @@ class User(UserMixin, db.Model):
     # run: flask db migrate -m "add on_leave is_available to users" && flask db upgrade
     on_leave            = db.Column(db.Boolean, default=False, nullable=False)
     is_available        = db.Column(db.Boolean, default=True,  nullable=False)
-    created_at          = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at          = db.Column(db.DateTime, default=lambda: utc_now())
     # Tracks last password change — reset tokens issued before this timestamp are invalid (one-time use)
     # run: flask db migrate -m "add password_changed_at to users" && flask db upgrade
     password_changed_at = db.Column(db.DateTime, nullable=True)
@@ -1028,7 +1137,7 @@ class User(UserMixin, db.Model):
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
         # Stamp timestamp so any outstanding reset token is invalidated (one-time use)
-        self.password_changed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        self.password_changed_at = utc_now()
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
@@ -1063,13 +1172,25 @@ def add_business_hours(start: datetime, hours: float) -> datetime:
     Return a datetime that is `hours` business hours after `start`.
 
     Rules:
+    - `start` is a naive UTC datetime (as stored in the DB).
+    - It is first converted to the app's local timezone so that business-hours
+      windows (BUSINESS_START_HOUR / BUSINESS_END_HOUR / BUSINESS_WORK_DAYS)
+      are evaluated against local wall-clock time, not UTC.
+      Without this, a ticket created at 10:00 Cairo time (= 07:00 UTC) would
+      be treated as having been created before business hours open (09:00),
+      making the SLA deadline wrong by up to 3 hours.
+    - The result is converted back to naive UTC before being returned, so it
+      can be stored / compared with other UTC datetimes consistently.
     - If `start` falls outside business hours it is snapped forward to the
       next business-hours opening before counting begins.
     - Critical tickets pass hours=2 and skip this function (they use raw time).
-    - Works correctly across weekends, overnight boundaries, and DST-naive datetimes.
+    - Works correctly across weekends, overnight boundaries, and DST transitions.
     """
+    # ── Convert UTC-naive input to local-naive for BH arithmetic ─────────────
+    local_start = utc_to_local(start)
+
     bh_seconds = int(hours * 3600)
-    current = start
+    current = local_start
 
     def _is_work_day(dt: datetime) -> bool:
         return dt.weekday() in BUSINESS_WORK_DAYS
@@ -1114,7 +1235,8 @@ def add_business_hours(start: datetime, hours: float) -> datetime:
                 current += timedelta(days=1)
             current = _day_open(current)
 
-    return current
+    # ── Convert local-naive result back to UTC-naive for storage/comparison ──
+    return local_to_utc(current)
 
 
 class Ticket(db.Model):
@@ -1130,8 +1252,8 @@ class Ticket(db.Model):
     created_by    = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     assigned_to   = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     department_id = db.Column(db.Integer, db.ForeignKey("departments.id"), nullable=True)
-    created_at    = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), index=True)
-    updated_at    = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at    = db.Column(db.DateTime, default=lambda: utc_now(), index=True)
+    updated_at    = db.Column(db.DateTime, default=lambda: utc_now(), onupdate=lambda: utc_now())
     is_deleted    = db.Column(db.Boolean, default=False, nullable=False, index=True)
     deleted_at    = db.Column(db.DateTime, nullable=True)
     sla_breached  = db.Column(db.Boolean, default=False, nullable=False)
@@ -1170,7 +1292,7 @@ class Ticket(db.Model):
 
     @property
     def is_overdue(self):
-        return (not self.sla_breached) and (datetime.now(timezone.utc).replace(tzinfo=None) > self.sla_deadline) \
+        return (not self.sla_breached) and (utc_now() > self.sla_deadline) \
                and self.status not in ("Resolved", "Closed")
 
     def __repr__(self):
@@ -1184,7 +1306,7 @@ class Comment(db.Model):
     ticket_id  = db.Column(db.Integer, db.ForeignKey("tickets.id"), nullable=False)
     user_id    = db.Column(db.Integer, db.ForeignKey("users.id"),   nullable=False)
     body       = db.Column(db.Text, nullable=False)
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at = db.Column(db.DateTime, default=lambda: utc_now())
 
     ticket = db.relationship("Ticket", back_populates="comments")
     author = db.relationship("User",   back_populates="comments")
@@ -1203,7 +1325,7 @@ class TicketHistory(db.Model):
     old_value   = db.Column(db.String(200), nullable=True)
     new_value   = db.Column(db.String(200), nullable=True)
     sla_breached= db.Column(db.Boolean, default=False)
-    created_at  = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at  = db.Column(db.DateTime, default=lambda: utc_now())
 
     ticket = db.relationship("Ticket", back_populates="history")
     actor  = db.relationship("User",   back_populates="history_actions")
@@ -1223,7 +1345,7 @@ class Attachment(db.Model):
     file_size     = db.Column(db.Integer, nullable=False)
     mime_type     = db.Column(db.String(100), nullable=False)
     file_data     = db.Column(db.LargeBinary, nullable=True)      # file bytes stored in Neon (Railway deployment)
-    created_at    = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at    = db.Column(db.DateTime, default=lambda: utc_now())
 
     ticket   = db.relationship("Ticket", back_populates="attachments")
     uploader = db.relationship("User")
@@ -1240,7 +1362,7 @@ class Notification(db.Model):
     ticket_id  = db.Column(db.Integer, db.ForeignKey("tickets.id"), nullable=True)
     message    = db.Column(db.String(255), nullable=False)
     is_read    = db.Column(db.Boolean, default=False, nullable=False)
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at = db.Column(db.DateTime, default=lambda: utc_now())
 
     recipient = db.relationship("User",   back_populates="notifications")
     ticket    = db.relationship("Ticket", back_populates="notifications")
@@ -1258,7 +1380,7 @@ class Backup(db.Model):
 
     id         = db.Column(db.Integer, primary_key=True)
     created_at = db.Column(db.DateTime,
-                           default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
+                           default=lambda: utc_now(),
                            nullable=False)
     size_kb    = db.Column(db.Integer,     nullable=True)
     source     = db.Column(db.String(20),  default="auto",  nullable=False)  # auto / manual
@@ -1329,7 +1451,7 @@ def generate_ticket_number():
     """
     from sqlalchemy import text
 
-    year = datetime.now(timezone.utc).year
+    year = utc_now().year
 
     # ── Step 1: try atomic increment on existing row ──────────────────
     row = db.session.execute(
@@ -1393,7 +1515,7 @@ def write_history(ticket, action, old_value, new_value, actor_id):
     # Effective status to evaluate = new_value if status_change action, otherwise current ticket status
     effective_status = str(new_value) if action == "status_change" else ticket.status
     breached = (
-        datetime.now(timezone.utc).replace(tzinfo=None) > ticket.sla_deadline
+        utc_now() > ticket.sla_deadline
         and effective_status not in ("Resolved", "Closed")
     )
     entry = TicketHistory(
@@ -1587,7 +1709,7 @@ def check_sla_breaches():
       dev server means there is no race to worry about.
     """
     with app.app_context():
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = utc_now()
         open_statuses = ("Open", "In Progress", "Waiting for Customer", "Waiting for Vendor", "Reopened")
 
         is_postgres = db.engine.dialect.name == "postgresql"
@@ -1649,7 +1771,7 @@ def check_waiting_for_customer_reminders():
     but the lock guarantees atomicity during the current run.
     """
     with app.app_context():
-        threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=3)
+        threshold = utc_now() - timedelta(days=3)
 
         is_postgres = db.engine.dialect.name == "postgresql"
         base_q = Ticket.query.filter(
@@ -1669,7 +1791,7 @@ def check_waiting_for_customer_reminders():
                    f"'Waiting for Customer' for 3+ days. Please follow up.")
             send_notification(target, ticket.id, msg)
             # Bump updated_at to avoid repeat spam within the same 3-day window
-            ticket.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            ticket.updated_at = utc_now()
             reminded += 1
 
         if reminded:
@@ -1735,7 +1857,7 @@ def upload_to_gdrive(json_bytes: bytes, timestamp) -> Optional[str]:
             scopes=["https://www.googleapis.com/auth/drive.file"],
         )
         service  = build("drive", "v3", credentials=creds)
-        filename = f"backup_{timestamp.strftime('%Y%m%d_%H%M%S')}.json"
+        filename = f"backup_{utc_to_local(timestamp).strftime('%Y%m%d_%H%M%S')}.json"
         media    = MediaInMemoryUpload(json_bytes, mimetype="application/json")
         file_meta = {"name": filename, "parents": [folder_id]}
         result = service.files().create(
@@ -1765,7 +1887,7 @@ def create_backup(source: str = "auto") -> Backup | None:
     import json as _json
     try:
         with app.app_context():
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            now = utc_now()
 
             # ── 1. Serialise all tables ──────────────────────────────
             data = {
@@ -1967,11 +2089,12 @@ def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
                 return
 
             email_size_kb = len(email_bytes) // 1024
-            filename = f"backup_{backup.created_at.strftime('%Y%m%d_%H%M%S')}.json"
-            subject  = f"[Ticket System] Backup — {backup.created_at.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
+            _backup_local = utc_to_local(backup.created_at)
+            filename = f"backup_{_backup_local.strftime('%Y%m%d_%H%M%S')}.json"
+            subject  = f"[Ticket System] Backup — {_backup_local.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
             body     = (
                 f"نسخة احتياطية تلقائية من نظام التذاكر\n\n"
-                f"التاريخ   : {backup.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"التاريخ   : {_backup_local.strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"الحجم الكامل : {backup.size_kb} KB (محفوظ في Neon)\n"
                 f"حجم الملف المرفق : {email_size_kb} KB (بدون محتوى المرفقات الثنائية)\n"
                 f"المصدر    : {backup.source}\n\n"
@@ -2509,7 +2632,7 @@ TEMPLATES = {
             <span class="badge bg-{{ status_color(tk.status) }}">{{ tk.status }}</span>
             {% if tk.sla_breached %}<i class="bi bi-exclamation-triangle-fill text-danger ms-1" title="SLA Breached"></i>{% endif %}
           </td>
-          <td class="text-muted small">{{ tk.created_at.strftime('%Y-%m-%d') }}</td>
+          <td class="text-muted small">{{ tk.created_at | localtime('%Y-%m-%d') }}</td>
           <td>
             <a href="{{ url_for('employee.ticket_detail', ticket_id=tk.id) }}"
                class="btn btn-outline-primary btn-sm">{{ t('view') }}</a>
@@ -2575,7 +2698,7 @@ TEMPLATES = {
             <span class="badge bg-{{ status_color(tk.status) }}">{{ tk.status }}</span>
             {% if tk.sla_breached %}<i class="bi bi-exclamation-triangle-fill text-danger ms-1" title="SLA Breached"></i>{% endif %}
           </td>
-          <td class="text-muted small">{{ tk.created_at.strftime('%Y-%m-%d') }}</td>
+          <td class="text-muted small">{{ tk.created_at | localtime('%Y-%m-%d') }}</td>
           <td>
             <a href="{{ url_for('employee.ticket_detail', ticket_id=tk.id) }}"
                class="btn btn-outline-info btn-sm">{{ t('view') }}</a>
@@ -2759,7 +2882,7 @@ TEMPLATES = {
       <div class="card-body">
         <p class="mb-1 text-muted small">
           <i class="bi bi-person"></i> {{ ticket.creator.name }} &nbsp;|&nbsp;
-          <i class="bi bi-calendar3"></i> {{ ticket.created_at.strftime('%Y-%m-%d %H:%M') }} &nbsp;|&nbsp;
+          <i class="bi bi-calendar3"></i> {{ ticket.created_at | localtime }} &nbsp;|&nbsp;
           <i class="bi bi-flag"></i>
           <span class="badge bg-{{ priority_color(ticket.priority) }}{{ ' priority-high' if ticket.priority == 'High' else '' }}">{{ ticket.priority }}</span>
           {% if ticket.sla_breached %}
@@ -2785,7 +2908,7 @@ TEMPLATES = {
           </div>
           <div class="flex-grow-1">
             <div class="fw-semibold small">{{ c.author.name }}
-              <span class="text-muted fw-normal">· {{ c.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+              <span class="text-muted fw-normal">· {{ c.created_at | localtime }}</span>
             </div>
             <p class="mb-0" style="white-space:pre-wrap">{{ c.body }}</p>
           </div>
@@ -2832,7 +2955,7 @@ TEMPLATES = {
               <div class="text-muted" style="font-size:0.75rem">
                 {{ (att.file_size / 1024)|round(1) }} KB &nbsp;·&nbsp;
                 {{ att.uploader.name }} &nbsp;·&nbsp;
-                {{ att.created_at.strftime('%Y-%m-%d %H:%M') }}
+                {{ att.created_at | localtime }}
               </div>
             </div>
           </div>
@@ -2884,7 +3007,7 @@ TEMPLATES = {
         <li class="list-group-item d-flex justify-content-between">
           <span class="text-muted">{{ t('sla_deadline') }}</span>
           <strong class="{{ 'text-danger' if ticket.sla_breached else '' }}">
-            {{ ticket.sla_deadline.strftime('%Y-%m-%d %H:%M') }}
+            {{ ticket.sla_deadline | localtime }}
           </strong>
         </li>
       </ul>
@@ -2990,7 +3113,7 @@ TEMPLATES = {
                - admin/mgr  : all actions #}
             {% for h in visible_history %}
             <tr>
-              <td class="text-muted small text-nowrap">{{ h.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+              <td class="text-muted small text-nowrap">{{ h.created_at | localtime }}</td>
               {% if current_user.role != 'employee' %}
               {# Full name visible only to admin / manager #}
               <td class="small">{{ h.actor.name if h.actor else '—' }}</td>
@@ -3263,7 +3386,7 @@ TEMPLATES = {
           <tbody>
             {% for h in recent_history %}
             <tr>
-              <td class="text-muted small text-nowrap">{{ h.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+              <td class="text-muted small text-nowrap">{{ h.created_at | localtime }}</td>
               <td>
                 <a href="{{ url_for('employee.ticket_detail', ticket_id=h.ticket_id) }}"
                    class="badge bg-secondary text-decoration-none">{{ h.ticket.ticket_number }}</a>
@@ -3449,7 +3572,7 @@ TEMPLATES = {
           <td><span class="badge bg-{{ priority_color(tk.priority) }}{{ ' priority-high' if tk.priority == 'High' else '' }}">{{ tk.priority }}</span></td>
           <td><span class="badge bg-{{ status_color(tk.status) }}">{{ tk.status }}</span></td>
           <td>{{ tk.assignee.name if tk.assignee else '—' }}</td>
-          <td class="text-muted small">{{ tk.created_at.strftime('%Y-%m-%d') }}</td>
+          <td class="text-muted small">{{ tk.created_at | localtime('%Y-%m-%d') }}</td>
           <td class="text-nowrap">
             <a href="{{ url_for('employee.ticket_detail', ticket_id=tk.id) }}"
                class="btn btn-outline-primary btn-sm">{{ t('view') }}</a>
@@ -3608,7 +3731,7 @@ function clearBulk() {
      class="list-group-item list-group-item-action {% if not n.is_read %}list-group-item-warning{% endif %}">
     <div class="d-flex justify-content-between">
       <span>{{ n.message }}</span>
-      <small class="text-muted ms-3">{{ n.created_at.strftime('%Y-%m-%d %H:%M') }}</small>
+      <small class="text-muted ms-3">{{ n.created_at | localtime }}</small>
     </div>
   </a>
   {% else %}
@@ -4077,7 +4200,7 @@ input, textarea, select {
               <td><span class="badge bg-{{ priority_color(tk.priority) }}">{{ tk.priority }}</span></td>
               <td>{{ tk.department.name if tk.department else '—' }}</td>
               <td>{{ tk.assignee.name if tk.assignee else '—' }}</td>
-              <td class="text-danger small">{{ tk.sla_deadline.strftime('%Y-%m-%d %H:%M') }}</td>
+              <td class="text-danger small">{{ tk.sla_deadline | localtime }}</td>
               <td>
                 <a href="{{ url_for('employee.ticket_detail', ticket_id=tk.id) }}"
                    class="btn btn-outline-danger btn-sm">{{ t('view') }}</a>
@@ -4147,7 +4270,7 @@ input, textarea, select {
           <td>
             <span class="badge bg-{{ status_color(tk.status) }}">{{ tk.status }}</span>
           </td>
-          <td>{{ tk.deleted_at.strftime('%Y-%m-%d %H:%M') if tk.deleted_at else '—' }}</td>
+          <td>{{ tk.deleted_at | localtime if tk.deleted_at else '—' }}</td>
           <td>
             <form method="POST"
                   action="{{ url_for('admin.restore_ticket', ticket_id=tk.id) }}"
@@ -4251,7 +4374,7 @@ input, textarea, select {
             </span>
           </td>
           <td><span class="badge bg-{{ status_color(tk.status) }}">{{ tk.status }}</span></td>
-          <td class="text-muted small">{{ tk.created_at.strftime('%Y-%m-%d') }}</td>
+          <td class="text-muted small">{{ tk.created_at | localtime('%Y-%m-%d') }}</td>
           <td>
             <a href="{{ url_for('employee.ticket_detail', ticket_id=tk.id) }}"
                class="btn btn-outline-primary btn-sm">{{ t('view') }}</a>
@@ -4576,8 +4699,8 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
 
             {# Date #}
             <td>
-              <span class="fw-semibold">{{ b.created_at.strftime('%Y-%m-%d') }}</span>
-              <span class="text-muted small ms-1">{{ b.created_at.strftime('%H:%M:%S') }}</span>
+              <span class="fw-semibold">{{ b.created_at | localtime('%Y-%m-%d') }}</span>
+              <span class="text-muted small ms-1">{{ b.created_at | localtime('%H:%M:%S') }}</span>
             </td>
 
             {# Size #}
@@ -4623,7 +4746,7 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
                       data-bs-toggle="modal"
                       data-bs-target="#restoreModal"
                       data-backup-id="{{ b.id }}"
-                      data-backup-date="{{ b.created_at.strftime('%Y-%m-%d %H:%M') }}">
+                      data-backup-date="{{ b.created_at | localtime }}">
                 <i class="bi bi-arrow-counterclockwise"></i>
               </button>
 
@@ -4634,7 +4757,7 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
                       data-bs-toggle="modal"
                       data-bs-target="#deleteBackupModal"
                       data-backup-id="{{ b.id }}"
-                      data-backup-date="{{ b.created_at.strftime('%Y-%m-%d %H:%M') }}">
+                      data-backup-date="{{ b.created_at | localtime }}">
                 <i class="bi bi-trash"></i>
               </button>
             </td>
@@ -5662,7 +5785,7 @@ def reopen_ticket(ticket_id):
 
     write_history(ticket, "status_change", ticket.status, "Reopened", current_user.id)
     ticket.status = "Reopened"
-    ticket.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    ticket.updated_at = utc_now()
 
     # Notify assignee if exists; otherwise notify all admins so nobody misses the reopen
     if ticket.assigned_to:
@@ -5736,7 +5859,7 @@ def overview():
                  .all())
     dept_stats = [(row[0], row[1]) for row in dept_rows]
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M")
+    now = local_now().strftime("%Y-%m-%d %H:%M")
 
     # Last 20 history entries across all visible tickets
     # joinedload(actor) + joinedload(ticket) eliminates the N+1 problem:
@@ -5877,7 +6000,7 @@ def update_ticket(ticket_id):
             write_history(ticket, "reassign", old_name, "Unassigned", current_user.id)
             ticket.assigned_to = None
 
-        ticket.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        ticket.updated_at = utc_now()
         db.session.commit()
         flash(t("flash_update_ok"), "success")
     return redirect(url_for("employee.ticket_detail", ticket_id=ticket_id))
@@ -5965,7 +6088,7 @@ def bulk_action():
                 changed = True
 
         if changed:   # only stamp updated_at when a real change was applied
-            ticket.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            ticket.updated_at = utc_now()
 
     db.session.commit()
     flash(t("flash_bulk_done", count=updated), "success")
@@ -5991,8 +6114,8 @@ def delete_ticket(ticket_id):
     # Write audit row first (before status changes)
     write_history(ticket, "status_change", ticket.status, "Deleted", current_user.id)
     ticket.is_deleted = True
-    ticket.deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    ticket.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    ticket.deleted_at = utc_now()
+    ticket.updated_at = utc_now()
     db.session.commit()
     flash(t("flash_ticket_deleted", num=ticket.ticket_number), "warning")
     # Redirect: if came from ticket_detail go to tickets list; else stay on list
@@ -6029,7 +6152,7 @@ def restore_ticket(ticket_id):
     ticket = Ticket.query.filter_by(id=ticket_id, is_deleted=True).first_or_404()
     ticket.is_deleted = False
     ticket.deleted_at = None
-    ticket.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    ticket.updated_at = utc_now()
     write_history(ticket, "status_change", "Deleted", ticket.status, current_user.id)
     db.session.commit()
     flash(t("flash_ticket_restored", num=ticket.ticket_number), "success")
@@ -6050,7 +6173,7 @@ def reports():
 
     is_manager = current_user.role == "manager"
     dept_filter = current_user.department_id if is_manager else None
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = local_now()
 
     # ── 1. Tickets by Type ──────────────────────────────────
     type_q = (
@@ -6224,7 +6347,7 @@ def export_reports():
 
     is_manager = current_user.role == "manager"
     dept_filter = current_user.department_id if is_manager else None
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = local_now()
 
     # ── Shared style helpers ────────────────────────────────────────────────
     HEADER_FONT  = Font(bold=True, color="FFFFFF", size=11)
@@ -6426,8 +6549,8 @@ def export_reports():
             tk.status,
             tk.department.name if tk.department else "—",
             tk.assignee.name  if tk.assignee  else "Unassigned",
-            tk.created_at.strftime("%Y-%m-%d %H:%M"),
-            tk.sla_deadline.strftime("%Y-%m-%d %H:%M"),
+            utc_to_local(tk.created_at).strftime("%Y-%m-%d %H:%M"),
+            utc_to_local(tk.sla_deadline).strftime("%Y-%m-%d %H:%M"),
         ])
         row_fill = PatternFill("solid", fgColor="FF9999")   # red — these are all breached
         for c in range(1, len(headers5) + 1):
@@ -6469,9 +6592,9 @@ def export_reports():
             tk.department.name  if tk.department else "—",
             tk.creator.name     if tk.creator    else "—",
             tk.assignee.name    if tk.assignee   else "Unassigned",
-            tk.created_at.strftime("%Y-%m-%d %H:%M"),
-            tk.updated_at.strftime("%Y-%m-%d %H:%M") if tk.updated_at else "—",
-            tk.sla_deadline.strftime("%Y-%m-%d %H:%M"),
+            utc_to_local(tk.created_at).strftime("%Y-%m-%d %H:%M"),
+            utc_to_local(tk.updated_at).strftime("%Y-%m-%d %H:%M") if tk.updated_at else "—",
+            utc_to_local(tk.sla_deadline).strftime("%Y-%m-%d %H:%M"),
             "Yes" if tk.sla_breached else "No",
         ])
         style_data_row(ws6, i, len(headers6), alternate=(i % 2 == 0))
@@ -6989,7 +7112,7 @@ def delete_department(dept_id):
         return redirect(url_for("admin.departments"))
 
     dept.is_deleted = True
-    dept.deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    dept.deleted_at = utc_now()
     db.session.commit()
     flash(t("flash_dept_deleted"), "success")
     return redirect(url_for("admin.departments"))
@@ -7060,7 +7183,7 @@ def download_backup(backup_id):
     """Stream a backup snapshot as a JSON file download."""
     import io
     backup   = db.get_or_404(Backup, backup_id)
-    filename = f"backup_{backup.created_at.strftime('%Y%m%d_%H%M%S')}.json"
+    filename = f"backup_{utc_to_local(backup.created_at).strftime('%Y%m%d_%H%M%S')}.json"
     return send_file(
         io.BytesIO(backup.data.encode("utf-8")),
         mimetype="application/json",
@@ -7227,7 +7350,7 @@ def preview_ticket_number():
     inside the POST handler.  In high-concurrency scenarios the final number
     may be different (incremented by one), which is acceptable for a preview.
     """
-    year       = datetime.now(timezone.utc).replace(tzinfo=None).year
+    year       = utc_now().year
     base_count = Ticket.query.filter(
         extract("year", Ticket.created_at) == year
     ).count() + 1
