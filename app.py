@@ -1869,12 +1869,22 @@ def upload_to_gdrive(json_bytes: bytes, timestamp) -> Optional[str]:
         service  = build("drive", "v3", credentials=creds)
         filename = f"backup_{utc_to_local(timestamp).strftime('%Y%m%d_%H%M%S')}.json.gz"
         media    = MediaInMemoryUpload(json_bytes, mimetype="application/gzip")
-        file_meta = {"name": filename, "parents": [folder_id]}
+        # Upload to Service Account's own Drive first (no parent = no quota issue)
+        file_meta = {"name": filename}
         result = service.files().create(
-            body=file_meta, media_body=media, fields="id",
-            supportsAllDrives=True
+            body=file_meta, media_body=media, fields="id"
         ).execute()
-        return result.get("id")
+        file_id = result.get("id")
+        # Then copy it into the target folder owned by the real user
+        service.files().copy(
+            fileId=file_id,
+            body={"name": filename, "parents": [folder_id]},
+            supportsAllDrives=True,
+            fields="id"
+        ).execute()
+        # Delete the original from Service Account's Drive
+        service.files().delete(fileId=file_id).execute()
+        return file_id
     except Exception as exc:
         app.logger.error(f"[Backup] Google Drive upload failed: {exc}")
         return None
