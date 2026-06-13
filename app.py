@@ -1864,14 +1864,15 @@ def upload_to_gdrive(json_bytes: bytes, timestamp) -> Optional[str]:
 
         creds = service_account.Credentials.from_service_account_info(
             _json.loads(creds_raw),
-            scopes=["https://www.googleapis.com/auth/drive.file"],
+            scopes=["https://www.googleapis.com/auth/drive"],
         )
         service  = build("drive", "v3", credentials=creds)
         filename = f"backup_{utc_to_local(timestamp).strftime('%Y%m%d_%H%M%S')}.json.gz"
         media    = MediaInMemoryUpload(json_bytes, mimetype="application/gzip")
         file_meta = {"name": filename, "parents": [folder_id]}
         result = service.files().create(
-            body=file_meta, media_body=media, fields="id"
+            body=file_meta, media_body=media, fields="id",
+            supportsAllDrives=True
         ).execute()
         return result.get("id")
     except Exception as exc:
