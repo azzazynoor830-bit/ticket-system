@@ -578,6 +578,13 @@ TRANSLATIONS = {
         "flash_backup_deleted":  "Backup deleted successfully",
         "flash_delete_error":    "Delete failed — check server logs",
         "flash_restore_error":   "Restore failed — check server logs",
+        "backup_upload_restore":        "Restore from File",
+        "backup_upload_restore_label":  "Select a backup JSON file to restore from",
+        "backup_upload_restore_hint":   "Upload a .json backup file downloaded earlier. ALL current data will be replaced.",
+        "backup_upload_restore_btn":    "Upload & Restore",
+        "flash_upload_restore_ok":      "Database restored from uploaded file successfully",
+        "flash_upload_restore_bad_file":"Invalid or unreadable backup file",
+        "flash_upload_restore_no_file": "No file selected",
         # Ticket types (displayed in UI)
         "ttype_it_support":      "IT Support",
         "ttype_hr_request":      "HR Request",
@@ -878,6 +885,13 @@ TRANSLATIONS = {
         "flash_backup_deleted":  "تم حذف النسخة الاحتياطية بنجاح",
         "flash_delete_error":    "فشل الحذف — راجع سجل الخادم",
         "flash_restore_error":   "فشلت عملية الاستعادة — راجع سجل الخادم",
+        "backup_upload_restore":        "استعادة من ملف",
+        "backup_upload_restore_label":  "اختر ملف JSON للاستعادة منه",
+        "backup_upload_restore_hint":   "ارفع ملف .json سبق تحميله. ستُستبدل جميع البيانات الحالية.",
+        "backup_upload_restore_btn":    "رفع واستعادة",
+        "flash_upload_restore_ok":      "تمت استعادة قاعدة البيانات من الملف المرفوع بنجاح",
+        "flash_upload_restore_bad_file":"الملف غير صالح أو تعذّر قراءته",
+        "flash_upload_restore_no_file": "لم يتم اختيار أي ملف",
         # أنواع التذاكر (تُعرض في الواجهة)
         "ttype_it_support":      "طلب دعم تقني",
         "ttype_hr_request":      "طلب موارد بشرية",
@@ -4698,12 +4712,18 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
   <h4 class="fw-bold mb-0">
     <i class="bi bi-shield-lock-fill text-success me-2"></i>{{ t('backups_title') }}
   </h4>
-  <form method="POST" action="{{ url_for('admin.manual_backup') }}">
-    {{ form.hidden_tag() }}
-    <button type="submit" class="btn btn-success btn-sm">
-      <i class="bi bi-cloud-arrow-up-fill me-1"></i>{{ t('backup_create') }}
+  <div class="d-flex gap-2">
+    <button type="button" class="btn btn-outline-primary btn-sm"
+            data-bs-toggle="modal" data-bs-target="#uploadRestoreModal">
+      <i class="bi bi-upload me-1"></i>{{ t('backup_upload_restore') }}
     </button>
-  </form>
+    <form method="POST" action="{{ url_for('admin.manual_backup') }}">
+      {{ form.hidden_tag() }}
+      <button type="submit" class="btn btn-success btn-sm">
+        <i class="bi bi-cloud-arrow-up-fill me-1"></i>{{ t('backup_create') }}
+      </button>
+    </form>
+  </div>
 </div>
 
 
@@ -4814,6 +4834,47 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
         {% endif %}
       </tbody>
     </table>
+  </div>
+</div>
+
+{# ── Upload & Restore Modal ───────────────────────────────────── #}
+<div class="modal fade" id="uploadRestoreModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content border-0 shadow">
+      <div class="modal-header bg-primary text-white">
+        <h5 class="modal-title fw-bold">
+          <i class="bi bi-upload me-2"></i>{{ t('backup_upload_restore') }}
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="POST"
+            action="{{ url_for('admin.upload_restore_backup') }}"
+            enctype="multipart/form-data">
+        {{ form.hidden_tag() }}
+        <div class="modal-body">
+          <p class="text-danger small fw-semibold mb-3">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>{{ t('backup_upload_restore_hint') }}
+          </p>
+          <label class="form-label fw-semibold" for="backupFileInput">
+            {{ t('backup_upload_restore_label') }}
+          </label>
+          <input class="form-control form-control-sm"
+                 type="file"
+                 id="backupFileInput"
+                 name="backup_file"
+                 accept=".json,application/json"
+                 required>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">
+            {{ t('cancel') }}
+          </button>
+          <button type="submit" class="btn btn-primary btn-sm">
+            <i class="bi bi-upload me-1"></i>{{ t('backup_upload_restore_btn') }}
+          </button>
+        </div>
+      </form>
+    </div>
   </div>
 </div>
 
@@ -7267,6 +7328,54 @@ def restore_backup(backup_id):
     except Exception as exc:
         db.session.rollback()
         app.logger.error(f"[Restore] failed for backup id={backup_id}: {exc}")
+        flash(t("flash_restore_error"), "danger")
+    return redirect(url_for("admin.backups_list"))
+
+
+@admin_bp.route("/backups/upload-restore", methods=["POST"])
+@admin_required
+def upload_restore_backup():
+    """
+    Restore the database from an uploaded JSON backup file.
+
+    Accepts a multipart/form-data POST with a single file field ``backup_file``.
+    The file must be a valid JSON backup produced by create_backup() / download_backup().
+    The restore logic is identical to restore_backup() — it delegates to
+    restore_from_backup() which runs inside a single transaction and rolls
+    back on any error, so live data is never partially overwritten.
+    """
+    import json as _json
+
+    form = EmptyForm()
+    if not form.validate_on_submit():
+        abort(400)
+
+    uploaded = request.files.get("backup_file")
+    if not uploaded or uploaded.filename == "":
+        flash(t("flash_upload_restore_no_file"), "warning")
+        return redirect(url_for("admin.backups_list"))
+
+    try:
+        raw = uploaded.read()
+        # Validate: must be parseable JSON with at least one known key
+        data = _json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("root is not an object")
+        # Build a throw-away Backup-like object so we can reuse restore_from_backup()
+        class _FakeBackup:
+            pass
+        fake = _FakeBackup()
+        fake.data = raw.decode("utf-8")
+
+        restore_from_backup(fake)
+        flash(t("flash_upload_restore_ok"), "success")
+    except (ValueError, UnicodeDecodeError, _json.JSONDecodeError) as exc:
+        db.session.rollback()
+        app.logger.warning(f"[Restore] uploaded file rejected: {exc}")
+        flash(t("flash_upload_restore_bad_file"), "danger")
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.error(f"[Restore] upload-restore failed: {exc}")
         flash(t("flash_restore_error"), "danger")
     return redirect(url_for("admin.backups_list"))
 
