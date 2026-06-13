@@ -5,6 +5,7 @@ Phase 1: Models + DB + Templates + SLA Scheduler
 """
 
 import os
+import gzip
 import logging
 import threading
 from logging.handlers import RotatingFileHandler
@@ -1866,8 +1867,8 @@ def upload_to_gdrive(json_bytes: bytes, timestamp) -> Optional[str]:
             scopes=["https://www.googleapis.com/auth/drive.file"],
         )
         service  = build("drive", "v3", credentials=creds)
-        filename = f"backup_{utc_to_local(timestamp).strftime('%Y%m%d_%H%M%S')}.json"
-        media    = MediaInMemoryUpload(json_bytes, mimetype="application/json")
+        filename = f"backup_{utc_to_local(timestamp).strftime('%Y%m%d_%H%M%S')}.json.gz"
+        media    = MediaInMemoryUpload(json_bytes, mimetype="application/gzip")
         file_meta = {"name": filename, "parents": [folder_id]}
         result = service.files().create(
             body=file_meta, media_body=media, fields="id"
@@ -2007,10 +2008,12 @@ def create_backup(source: str = "auto") -> Backup | None:
                 ],
             }
 
-            # ── 2. Dump to JSON ──────────────────────────────────────
+            # ── 2. Dump to JSON then compress ───────────────────────
             json_str   = _json.dumps(data, ensure_ascii=False, indent=2)
             json_bytes = json_str.encode("utf-8")
-            size_kb    = len(json_bytes) // 1024
+            gzip_bytes = gzip.compress(json_bytes, compresslevel=6)
+            size_kb      = len(json_bytes)  // 1024
+            size_gz_kb   = len(gzip_bytes)  // 1024
 
             # ── 3. Save Backup record to Neon ────────────────────────
             backup = Backup(data=json_str, size_kb=size_kb, source=source)
@@ -2018,7 +2021,7 @@ def create_backup(source: str = "auto") -> Backup | None:
             db.session.flush()          # assign backup.id before Drive upload
 
             # ── 4. Upload to Google Drive (optional) ─────────────────
-            gdrive_id = upload_to_gdrive(json_bytes, backup.created_at)
+            gdrive_id = upload_to_gdrive(gzip_bytes, backup.created_at)
             if gdrive_id:
                 backup.gdrive_id = gdrive_id
 
@@ -2034,7 +2037,8 @@ def create_backup(source: str = "auto") -> Backup | None:
                 app.logger.info(f"[Backup] Pruned {len(old_backups)} old backup(s)")
 
             app.logger.info(
-                f"[Backup] Created — id={backup.id} size={size_kb}KB "
+                f"[Backup] Created — id={backup.id} "
+                f"size={size_kb}KB → compressed={size_gz_kb}KB "
                 f"source={source} drive={'yes' if gdrive_id else 'no'}"
             )
 
@@ -2042,7 +2046,7 @@ def create_backup(source: str = "auto") -> Backup | None:
             import threading
             backup_thread = threading.Thread(
                 target=send_backup_email,
-                args=(backup.id, json_bytes),
+                args=(backup.id, json_bytes, gzip_bytes),
                 daemon=True,
             )
             backup_thread.start()
@@ -2055,9 +2059,9 @@ def create_backup(source: str = "auto") -> Backup | None:
         return None
 
 
-def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
+def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> None:
     """
-    Send the backup JSON as an email attachment to BACKUP_MAIL_TO.
+    Send the backup as a gzip-compressed JSON attachment to BACKUP_MAIL_TO.
     Runs in a background thread — accepts backup_id (not the ORM object)
     to avoid detached-instance errors across thread boundaries.
     Silently skipped if MAIL_SERVER or BACKUP_MAIL_TO are not configured.
@@ -2066,6 +2070,9 @@ def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
     attachment content) to keep the email size well within SMTP limits
     (Gmail = 25 MB, many servers = 10 MB).  The full backup including
     file bytes is always stored in Neon and can be restored from there.
+
+    json_bytes  — uncompressed JSON (used to strip file_data_b64 before sending)
+    gzip_bytes  — compressed bytes that become the .json.gz attachment
     """
     import json as _json_email
     backup_to = os.environ.get("BACKUP_MAIL_TO", "")
@@ -2080,14 +2087,16 @@ def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
 
             # ── Build a stripped copy: remove file_data_b64 from every
             #    attachment entry so the email stays small.
-            #    The full binary data is already safely stored in Neon. ──
+            #    Strip from json_bytes (plain JSON), then re-compress for
+            #    the attachment so the recipient gets a clean .json.gz file.
             try:
                 data_for_email = _json_email.loads(json_bytes.decode("utf-8"))
                 for att in data_for_email.get("attachments", []):
                     att["file_data_b64"] = None   # strip binary — restore from Neon
-                email_bytes = _json_email.dumps(
+                stripped_json_bytes = _json_email.dumps(
                     data_for_email, ensure_ascii=False, indent=2
                 ).encode("utf-8")
+                email_gz_bytes = gzip.compress(stripped_json_bytes, compresslevel=6)
             except Exception as _strip_err:
                 # Fallback: if stripping fails for any reason, skip the email
                 # rather than send an oversized attachment that SMTP will reject.
@@ -2097,17 +2106,17 @@ def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
                 )
                 return
 
-            email_size_kb = len(email_bytes) // 1024
+            email_size_kb = len(email_gz_bytes) // 1024
             _backup_local = utc_to_local(backup.created_at)
-            filename = f"backup_{_backup_local.strftime('%Y%m%d_%H%M%S')}.json"
+            filename = f"backup_{_backup_local.strftime('%Y%m%d_%H%M%S')}.json.gz"
             subject  = f"[Ticket System] Backup — {_backup_local.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
             body     = (
                 f"نسخة احتياطية تلقائية من نظام التذاكر\n\n"
                 f"التاريخ   : {_backup_local.strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"الحجم الكامل : {backup.size_kb} KB (محفوظ في Neon)\n"
-                f"حجم الملف المرفق : {email_size_kb} KB (بدون محتوى المرفقات الثنائية)\n"
+                f"حجم الملف المرفق : {email_size_kb} KB (مضغوط، بدون محتوى المرفقات الثنائية)\n"
                 f"المصدر    : {backup.source}\n\n"
-                f"الملف المرفق يحتوي على نسخة من جميع البيانات الهيكلية.\n"
+                f"الملف المرفق يحتوي على نسخة مضغوطة من جميع البيانات الهيكلية.\n"
                 f"محتوى المرفقات الثنائية محفوظ في قاعدة البيانات ويمكن استعادته منها.\n"
                 f"احتفظ به في مكان آمن."
             )
@@ -2118,15 +2127,15 @@ def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
             )
             msg.attach(
                 filename=filename,
-                content_type="application/json",
-                data=email_bytes,
+                content_type="application/gzip",
+                data=email_gz_bytes,
             )
             mail.send(msg)
             backup.email_sent = True
             db.session.commit()
             app.logger.info(
                 f"[Backup] Email sent to {backup_to!r} — {filename} "
-                f"({email_size_kb} KB stripped / {backup.size_kb} KB full)"
+                f"({email_size_kb} KB compressed / {backup.size_kb} KB full)"
             )
         except Exception as exc:
             app.logger.warning(f"[Backup] Email send failed: {exc}")
