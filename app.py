@@ -296,6 +296,15 @@ def validate_password(password):
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 csrf = CSRFProtect(app)
+
+@app.after_request
+def add_security_headers(response):
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if not app.debug:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
 login_manager = LoginManager(app)
 login_manager.login_view = "auth.login"
 login_manager.login_message = "Please log in first"
