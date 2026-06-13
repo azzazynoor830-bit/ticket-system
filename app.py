@@ -960,7 +960,7 @@ class Department(db.Model):
     __tablename__ = "departments"
 
     id         = db.Column(db.Integer, primary_key=True)
-    name       = db.Column(db.String(100), nullable=False, unique=True)
+    name       = db.Column(db.String(100), nullable=False)  # uniqueness enforced at app level (is_deleted-aware)
     manager_id = db.Column(
         db.Integer,
         db.ForeignKey("users.id", use_alter=True, name="fk_dept_manager_id"),
@@ -1271,6 +1271,29 @@ class Backup(db.Model):
 
 
 # ─────────────────────────────────────────────
+# TICKET COUNTER MODEL
+# ─────────────────────────────────────────────
+
+class TicketCounter(db.Model):
+    """
+    Monotonic per-year counter for ticket numbers.
+
+    A single row per calendar year holds the last-issued sequence number.
+    generate_ticket_number() atomically increments it with
+    UPDATE ... RETURNING (works on both SQLite ≥ 3.35 and PostgreSQL),
+    which is the only safe way to avoid duplicates under concurrent load —
+    threading locks alone cannot protect across the generate→commit gap.
+    """
+    __tablename__ = "ticket_counter"
+
+    year        = db.Column(db.Integer, primary_key=True)
+    last_number = db.Column(db.Integer, default=0, nullable=False)
+
+    def __repr__(self):
+        return f"<TicketCounter year={self.year} last={self.last_number}>"
+
+
+# ─────────────────────────────────────────────
 # FLASK-LOGIN USER LOADER
 # ─────────────────────────────────────────────
 
@@ -1283,33 +1306,76 @@ def load_user(user_id):
 # HELPERS
 # ─────────────────────────────────────────────
 
-# Lock prevents two threads from generating the same ticket number simultaneously.
-# Protects the read-check-return sequence in generate_ticket_number() from race conditions.
-_ticket_number_lock = threading.Lock()
-
 def generate_ticket_number():
     """
-    Generate TKT-YYYY-NNNN.
-    The threading.Lock ensures only one thread at a time executes the
-    read-check-return sequence, preventing duplicate numbers under concurrent load.
-    For multi-process deployments (Gunicorn), the UNIQUE constraint on ticket_number
-    still guards against cross-process duplicates.
+    Generate TKT-YYYY-NNNN using an atomic database counter (TicketCounter table).
+
+    Strategy
+    --------
+    A threading.Lock alone cannot prevent duplicate ticket numbers because it only
+    protects the *generation* step.  Between lock-release and db.session.commit()
+    another thread can read the same un-committed count and return the same number.
+
+    The fix: delegate sequencing entirely to the database with an atomic
+    UPDATE … RETURNING.  The DB engine serialises concurrent UPDATEs on the
+    same row, so two threads/processes can never claim the same number.
+
+    Works on:
+      • SQLite ≥ 3.35  (released March 2021) — supports RETURNING
+      • PostgreSQL      — native support for UPDATE … RETURNING
+
+    Gaps in the sequence (e.g. after a rolled-back ticket creation) are
+    acceptable; uniqueness is the only invariant that matters.
     """
-    with _ticket_number_lock:
-        year = datetime.now(timezone.utc).replace(tzinfo=None).year
-        base_count = Ticket.query.filter(
-            extract("year", Ticket.created_at) == year
-        ).count() + 1
+    from sqlalchemy import text
 
-        for attempt in range(10):   # Max 10 attempts — sufficient for any realistic load
-            candidate = f"TKT-{year}-{base_count + attempt:04d}"
-            # Ensure the number does not already exist before returning it
-            if not Ticket.query.filter_by(ticket_number=candidate).first():
-                return candidate
+    year = datetime.now(timezone.utc).year
 
-    # Very rare fallback — short UUID guarantees uniqueness
-    import uuid
-    return f"TKT-{year}-{uuid.uuid4().hex[:6].upper()}"
+    # ── Step 1: try atomic increment on existing row ──────────────────
+    row = db.session.execute(
+        text(
+            "UPDATE ticket_counter "
+            "SET last_number = last_number + 1 "
+            "WHERE year = :y "
+            "RETURNING last_number"
+        ),
+        {"y": year},
+    ).fetchone()
+
+    if row is None:
+        # ── Step 2: first ticket of this year — create counter row ────
+        # INSERT OR IGNORE (SQLite) / INSERT … ON CONFLICT DO NOTHING (PG)
+        # then retry the UPDATE so we always get the RETURNING value.
+        dialect = db.engine.dialect.name          # "sqlite" or "postgresql"
+        if dialect == "sqlite":
+            db.session.execute(
+                text("INSERT OR IGNORE INTO ticket_counter (year, last_number) VALUES (:y, 0)"),
+                {"y": year},
+            )
+        else:  # postgresql (and any other ANSI-SQL engine)
+            db.session.execute(
+                text(
+                    "INSERT INTO ticket_counter (year, last_number) VALUES (:y, 0) "
+                    "ON CONFLICT (year) DO NOTHING"
+                ),
+                {"y": year},
+            )
+        row = db.session.execute(
+            text(
+                "UPDATE ticket_counter "
+                "SET last_number = last_number + 1 "
+                "WHERE year = :y "
+                "RETURNING last_number"
+            ),
+            {"y": year},
+        ).fetchone()
+
+    if row is None:
+        # Extremely rare fallback — should never happen in practice
+        import uuid
+        return f"TKT-{year}-{uuid.uuid4().hex[:6].upper()}"
+
+    return f"TKT-{year}-{row[0]:04d}"
 
 
 def write_history(ticket, action, old_value, new_value, actor_id):
@@ -1971,6 +2037,7 @@ def restore_from_backup(backup: Backup) -> None:
         db.session.execute(db.text("DELETE FROM tickets"))
         db.session.execute(db.text("DELETE FROM users"))
         db.session.execute(db.text("DELETE FROM departments"))
+        db.session.execute(db.text("DELETE FROM ticket_counter"))    # reset so counter stays in sync with restored ticket numbers
 
         # ── INSERT in parent-first order ─────────────────────────────
 
@@ -2119,6 +2186,23 @@ def restore_from_backup(backup: Backup) -> None:
                 "is_read":    n["is_read"],
                 "created_at": n.get("created_at"),
             })
+
+        # ── Rebuild ticket_counter from restored ticket numbers ──────────────────
+        # Parse every ticket_number (format TKT-YYYY-NNNN), find the highest
+        # sequence number per year, and insert the correct counter rows.
+        # Works with backups created before this counter table existed.
+        import re as _re
+        _counter_map: dict[int, int] = {}
+        for _t in data.get("tickets", []):
+            _m = _re.match(r"TKT-(\d{4})-(\d+)", _t.get("ticket_number") or "")
+            if _m:
+                _y, _n = int(_m.group(1)), int(_m.group(2))
+                _counter_map[_y] = max(_counter_map.get(_y, 0), _n)
+        for _year, _last in _counter_map.items():
+            db.session.execute(
+                db.text("INSERT INTO ticket_counter (year, last_number) VALUES (:y, :n)"),
+                {"y": _year, "n": _last},
+            )
 
         # ── Reset PostgreSQL sequences ───────────────────────────────
         # Only needed on PostgreSQL; silently skip on SQLite (dev).
@@ -5222,12 +5306,11 @@ def new_ticket():
 
 
         # ── Atomic ticket creation with IntegrityError retry ──────────────
-        # generate_ticket_number() does a SELECT COUNT then picks a candidate.
-        # Two simultaneous requests can pass that check and then race to INSERT
-        # the same ticket_number, hitting the UNIQUE constraint on flush().
-        # The loop retries up to 5 times, regenerating the number each time.
-        # On the second attempt generate_ticket_number() will find the taken
-        # number already committed and skip it — so convergence is guaranteed.
+        # generate_ticket_number() atomically increments a TicketCounter row
+        # using UPDATE … RETURNING, so two concurrent requests always receive
+        # distinct numbers.  The IntegrityError retry loop below is a last-resort
+        # safety net (e.g. counter row missing) — under normal operation it never
+        # triggers more than once.
 
         # ── Server-side blank validation (HTML required can be bypassed) ──
         _title_val = request.form.get("title", "").strip()
@@ -6849,7 +6932,13 @@ def edit_department():
         flash(t("err_invalid_request"), "danger")
         return redirect(url_for("admin.departments"))
 
-    dept = db.session.get(Department, int(dept_id))
+    try:
+        dept_id_int = int(dept_id)
+    except (ValueError, TypeError):
+        flash(t("err_invalid_request"), "danger")
+        return redirect(url_for("admin.departments"))
+
+    dept = db.session.get(Department, dept_id_int)
     if not dept:
         abort(404)
 
@@ -6915,6 +7004,17 @@ def restore_department(dept_id):
         abort(400)
 
     dept = Department.query.filter_by(id=dept_id, is_deleted=True).first_or_404()
+
+    # Guard: block restore if an active department already has the same name
+    conflict = Department.query.filter(
+        db.func.lower(Department.name) == dept.name.lower(),
+        Department.is_deleted == False,
+        Department.id != dept.id,
+    ).first()
+    if conflict:
+        flash(t("dept_already_exists"), "danger")
+        return redirect(url_for("admin.departments"))
+
     dept.is_deleted = False
     dept.deleted_at = None
     db.session.commit()
@@ -7082,7 +7182,7 @@ def dept_employees_by_select():
         return f'<option value="">{placeholder}</option>'
     placeholder = translations.get("choose_assignee", "-- Select Assignee --")
     options = f'<option value="">{placeholder}</option>'
-    options += "".join(f'<option value="{u.id}">{u.name}</option>' for u in users)
+    options += "".join(f'<option value="{u.id}">{_html_escape(u.name)}</option>' for u in users)
     return options
 
 
@@ -7112,7 +7212,7 @@ def filter_dept_agents():
     all_lbl = TRANSLATIONS.get(lang, TRANSLATIONS["en"]).get("all_assignees", "All Assignees")
 
     html = f'<select name="assignee" class="form-select form-select-sm"><option value="">{all_lbl}</option>'
-    html += "".join(f'<option value="{u.id}">{u.name}</option>' for u in agents)
+    html += "".join(f'<option value="{u.id}">{_html_escape(u.name)}</option>' for u in agents)
     html += "</select>"
     return html
 
@@ -7131,7 +7231,7 @@ def preview_ticket_number():
     base_count = Ticket.query.filter(
         extract("year", Ticket.created_at) == year
     ).count() + 1
-    # Walk forward until we find a free slot (same logic as generate_ticket_number)
+    # Walk forward until we find a free slot (READ-ONLY estimate — does not touch ticket_counter)
     for attempt in range(10):
         candidate = f"TKT-{year}-{base_count + attempt:04d}"
         if not Ticket.query.filter_by(ticket_number=candidate).first():
@@ -7239,7 +7339,7 @@ def ensure_columns():
         ("users",       "is_available",        "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 1"),
         ("users",       "password_changed_at", "TIMESTAMP",        "TEXT",             None),
         ("attachments", "file_data",           "BYTEA",            "BLOB",             None),  # Railway DB storage
-        ("backups",     "email_sent",          "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT FALSE"),
+        ("backups",     "email_sent",          "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 0"),
     ]
     with app.app_context():
         is_postgres = db.engine.dialect.name == "postgresql"
@@ -7292,14 +7392,15 @@ def ensure_columns():
 
 bootstrap_files()   # write templates/static to disk on first run
 
-# Run ensure_columns() at module level so it executes under Gunicorn/WSGI as well.
+# Run db.create_all() + ensure_columns() at module level so both execute under Gunicorn/WSGI.
 # (The if __name__=='__main__' block is only reached when running 'python app.py' directly.)
 with app.app_context():
     try:
-        ensure_columns()
+        db.create_all()          # create any missing tables (idempotent)
+        ensure_columns()         # add any missing columns to existing tables
     except Exception as _ec_err:
         import warnings
-        warnings.warn(f"ensure_columns() failed at startup: {_ec_err}", RuntimeWarning, stacklevel=1)
+        warnings.warn(f"startup db init failed: {_ec_err}", RuntimeWarning, stacklevel=1)
 
 # ─────────────────────────────────────────────
 # CLI: ensure-cols
