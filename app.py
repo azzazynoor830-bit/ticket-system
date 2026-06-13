@@ -4862,7 +4862,7 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
                  type="file"
                  id="backupFileInput"
                  name="backup_file"
-                 accept=".json,application/json"
+                 accept=".json,.json.gz,application/json,application/gzip"
                  required>
         </div>
         <div class="modal-footer">
@@ -7357,6 +7357,9 @@ def upload_restore_backup():
 
     try:
         raw = uploaded.read()
+        # Auto-detect gzip: magic bytes \x1f\x8b or .gz extension
+        if raw[:2] == b'\x1f\x8b' or uploaded.filename.endswith('.gz'):
+            raw = gzip.decompress(raw)
         # Validate: must be parseable JSON with at least one known key
         data = _json.loads(raw.decode("utf-8"))
         if not isinstance(data, dict):
