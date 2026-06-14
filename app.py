@@ -2285,7 +2285,7 @@ def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> N
                 stripped_json_bytes = _json_email.dumps(
                     data_for_email, ensure_ascii=False, indent=2
                 ).encode("utf-8")
-                email_gz_bytes = gzip.compress(stripped_json_bytes, compresslevel=6)
+                pass  # stripped_json_bytes ready — no compression (Brevo rejects .gz)
             except Exception as _strip_err:
                 app.logger.warning(
                     f"[Backup] Could not strip file_data_b64 for email "
@@ -2293,23 +2293,23 @@ def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> N
                 )
                 return
 
-            email_size_kb = len(email_gz_bytes) // 1024
+            email_size_kb = len(stripped_json_bytes) // 1024
             _backup_local = utc_to_local(backup.created_at)
-            filename = f"backup_{_backup_local.strftime('%Y%m%d_%H%M%S')}.json.gz"
+            filename = f"backup_{_backup_local.strftime('%Y%m%d_%H%M%S')}.json"
             subject  = f"[Ticket System] Backup -- {_backup_local.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
             body_text = (
                 f"نسخة احتياطية تلقائية من نظام التذاكر\n\n"
                 f"التاريخ   : {_backup_local.strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"الحجم الكامل : {backup.size_kb} KB (محفوظ في Neon)\n"
-                f"حجم الملف المرفق : {email_size_kb} KB (مضغوط، بدون محتوى المرفقات الثنائية)\n"
+                f"حجم الملف المرفق : {email_size_kb} KB (بدون محتوى المرفقات الثنائية)\n"
                 f"المصدر    : {backup.source}\n\n"
-                f"الملف المرفق يحتوي على نسخة مضغوطة من جميع البيانات الهيكلية.\n"
+                f"الملف المرفق يحتوي على نسخة من جميع البيانات الهيكلية.\n"
                 f"محتوى المرفقات الثنائية محفوظ في قاعدة البيانات ويمكن استعادته منها.\n"
                 f"احتفظ به في مكان آمن."
             )
             sender = os.environ.get("MAIL_DEFAULT_SENDER", "noreply@ticketsystem.com")
 
-            # Brevo API supports attachments as base64-encoded content
+            # Brevo does not support .gz attachments — send plain .json
             response = _requests.post(
                 "https://api.brevo.com/v3/smtp/email",
                 headers={
@@ -2324,7 +2324,7 @@ def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> N
                     "attachment":  [
                         {
                             "name":    filename,
-                            "content": _base64.b64encode(email_gz_bytes).decode("ascii"),
+                            "content": _base64.b64encode(stripped_json_bytes).decode("ascii"),
                         }
                     ],
                 },
