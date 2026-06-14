@@ -1563,39 +1563,37 @@ def write_history(ticket, action, old_value, new_value, actor_id):
 
 def send_email(to: str, subject: str, body_text: str, body_html: Optional[str] = None) -> bool:
     """
-    Send an email via SendGrid HTTP API.  Returns True on success, False on any error.
-    Silently skipped if SENDGRID_API_KEY is not configured.
+    Send an email via Brevo (Sendinblue) HTTP API.  Returns True on success, False on any error.
+    Silently skipped if BREVO_API_KEY is not configured.
     """
-    api_key = os.environ.get("SENDGRID_API_KEY")
+    api_key = os.environ.get("BREVO_API_KEY")
     if not api_key:
-        app.logger.warning("[Email] SENDGRID_API_KEY not configured — email skipped.")
+        app.logger.warning("[Email] BREVO_API_KEY not configured — email skipped.")
         return False
     try:
         import requests as _requests
         sender = os.environ.get("MAIL_DEFAULT_SENDER", "noreply@ticketsystem.com")
         response = _requests.post(
-            "https://api.sendgrid.com/v3/mail/send",
+            "https://api.brevo.com/v3/smtp/email",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "api-key": api_key,
                 "Content-Type": "application/json",
             },
             json={
-                "personalizations": [{"to": [{"email": to}]}],
-                "from": {"email": sender},
+                "sender": {"email": sender},
+                "to": [{"email": to}],
                 "subject": subject,
-                "content": [
-                    {"type": "text/plain", "value": body_text},
-                    {"type": "text/html", "value": body_html or body_text},
-                ],
+                "textContent": body_text,
+                "htmlContent": body_html or body_text,
             },
             timeout=10,
         )
-        if response.status_code == 202:
+        if response.status_code in (200, 201):
             return True
-        app.logger.warning(f"[Email] SendGrid API error {response.status_code}: {response.text}")
+        app.logger.warning(f"[Email] Brevo API error {response.status_code}: {response.text}")
         return False
     except Exception as exc:
-        app.logger.warning(f"[Email] SendGrid API failed: {exc}")
+        app.logger.warning(f"[Email] Brevo API failed: {exc}")
         return False
 
 
