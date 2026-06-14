@@ -2193,10 +2193,29 @@ def create_backup(source: str = "auto") -> Backup | None:
 
             db.session.commit()
 
-            # ── 5. Prune backups older than 30 days ──────────────────
-            cutoff = now - timedelta(days=30)
+            # ── 5. Prune backups older than 15 days ──────────────────
+            cutoff = now - timedelta(days=15)
             old_backups = Backup.query.filter(Backup.created_at < cutoff).all()
             for old in old_backups:
+                # Delete from Google Drive first (before removing the DB record)
+                if old.gdrive_id:
+                    try:
+                        from googleapiclient.discovery import build
+                        from google.oauth2.credentials import Credentials
+                        _creds = Credentials(
+                            token=None,
+                            refresh_token=os.environ.get("GDRIVE_REFRESH_TOKEN"),
+                            token_uri="https://oauth2.googleapis.com/token",
+                            client_id=os.environ.get("GDRIVE_CLIENT_ID"),
+                            client_secret=os.environ.get("GDRIVE_CLIENT_SECRET"),
+                            scopes=["https://www.googleapis.com/auth/drive"],
+                        )
+                        build("drive", "v3", credentials=_creds).files().delete(
+                            fileId=old.gdrive_id
+                        ).execute()
+                        app.logger.info(f"[Backup] Deleted Drive file {old.gdrive_id} for backup id={old.id}")
+                    except Exception as _drive_exc:
+                        app.logger.warning(f"[Backup] Could not delete Drive file {old.gdrive_id}: {_drive_exc}")
                 db.session.delete(old)
             if old_backups:
                 db.session.commit()
@@ -2227,22 +2246,28 @@ def create_backup(source: str = "auto") -> Backup | None:
 
 def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> None:
     """
-    Send the backup as a gzip-compressed JSON attachment to BACKUP_MAIL_TO.
-    Runs in a background thread — accepts backup_id (not the ORM object)
+    Send the backup as a gzip-compressed JSON attachment to BACKUP_MAIL_TO
+    via Brevo API (same provider used by send_email / password reset).
+    Runs in a background thread -- accepts backup_id (not the ORM object)
     to avoid detached-instance errors across thread boundaries.
-    Silently skipped if MAIL_SERVER or BACKUP_MAIL_TO are not configured.
+    Silently skipped if BREVO_API_KEY or BACKUP_MAIL_TO are not configured.
 
     The email attachment intentionally excludes file_data_b64 (binary
-    attachment content) to keep the email size well within SMTP limits
-    (Gmail = 25 MB, many servers = 10 MB).  The full backup including
-    file bytes is always stored in Neon and can be restored from there.
+    attachment content) to keep the email size reasonable.
+    The full backup including file bytes is always stored in Neon and
+    can be restored from there.
 
-    json_bytes  — uncompressed JSON (used to strip file_data_b64 before sending)
-    gzip_bytes  — compressed bytes that become the .json.gz attachment
+    json_bytes  -- uncompressed JSON (used to strip file_data_b64 before sending)
+    gzip_bytes  -- compressed bytes that become the .json.gz attachment
     """
     import json as _json_email
+    import base64 as _base64
+    import requests as _requests
+
+    api_key   = os.environ.get("BREVO_API_KEY", "")
     backup_to = os.environ.get("BACKUP_MAIL_TO", "")
-    if not app.config.get("MAIL_SERVER") or not backup_to:
+    if not api_key or not backup_to:
+        app.logger.warning("[Backup] BREVO_API_KEY or BACKUP_MAIL_TO not configured -- backup email skipped.")
         return
 
     with app.app_context():
@@ -2251,32 +2276,28 @@ def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> N
             if not backup:
                 return
 
-            # ── Build a stripped copy: remove file_data_b64 from every
-            #    attachment entry so the email stays small.
-            #    Strip from json_bytes (plain JSON), then re-compress for
-            #    the attachment so the recipient gets a clean .json.gz file.
+            # Build a stripped copy: remove file_data_b64 from every
+            # attachment entry so the email stays small.
             try:
                 data_for_email = _json_email.loads(json_bytes.decode("utf-8"))
                 for att in data_for_email.get("attachments", []):
-                    att["file_data_b64"] = None   # strip binary — restore from Neon
+                    att["file_data_b64"] = None   # strip binary -- restore from Neon
                 stripped_json_bytes = _json_email.dumps(
                     data_for_email, ensure_ascii=False, indent=2
                 ).encode("utf-8")
                 email_gz_bytes = gzip.compress(stripped_json_bytes, compresslevel=6)
             except Exception as _strip_err:
-                # Fallback: if stripping fails for any reason, skip the email
-                # rather than send an oversized attachment that SMTP will reject.
                 app.logger.warning(
                     f"[Backup] Could not strip file_data_b64 for email "
-                    f"(backup_id={backup_id}): {_strip_err} — email skipped."
+                    f"(backup_id={backup_id}): {_strip_err} -- email skipped."
                 )
                 return
 
             email_size_kb = len(email_gz_bytes) // 1024
             _backup_local = utc_to_local(backup.created_at)
             filename = f"backup_{_backup_local.strftime('%Y%m%d_%H%M%S')}.json.gz"
-            subject  = f"[Ticket System] Backup — {_backup_local.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
-            body     = (
+            subject  = f"[Ticket System] Backup -- {_backup_local.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
+            body_text = (
                 f"نسخة احتياطية تلقائية من نظام التذاكر\n\n"
                 f"التاريخ   : {_backup_local.strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"الحجم الكامل : {backup.size_kb} KB (محفوظ في Neon)\n"
@@ -2286,26 +2307,43 @@ def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> N
                 f"محتوى المرفقات الثنائية محفوظ في قاعدة البيانات ويمكن استعادته منها.\n"
                 f"احتفظ به في مكان آمن."
             )
-            msg = MailMessage(
-                subject=subject,
-                recipients=[backup_to],
-                body=body,
+            sender = os.environ.get("MAIL_DEFAULT_SENDER", "noreply@ticketsystem.com")
+
+            # Brevo API supports attachments as base64-encoded content
+            response = _requests.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={
+                    "api-key": api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "sender":      {"email": sender},
+                    "to":          [{"email": backup_to}],
+                    "subject":     subject,
+                    "textContent": body_text,
+                    "attachment":  [
+                        {
+                            "name":    filename,
+                            "content": _base64.b64encode(email_gz_bytes).decode("ascii"),
+                        }
+                    ],
+                },
+                timeout=30,
             )
-            msg.attach(
-                filename=filename,
-                content_type="application/gzip",
-                data=email_gz_bytes,
-            )
-            mail.send(msg)
-            backup.email_sent = True
-            db.session.commit()
-            app.logger.info(
-                f"[Backup] Email sent to {backup_to!r} — {filename} "
-                f"({email_size_kb} KB compressed / {backup.size_kb} KB full)"
-            )
+
+            if response.status_code in (200, 201):
+                backup.email_sent = True
+                db.session.commit()
+                app.logger.info(
+                    f"[Backup] Email sent via Brevo to {backup_to!r} -- {filename} "
+                    f"({email_size_kb} KB compressed / {backup.size_kb} KB full)"
+                )
+            else:
+                app.logger.warning(
+                    f"[Backup] Brevo API error {response.status_code}: {response.text}"
+                )
         except Exception as exc:
             app.logger.warning(f"[Backup] Email send failed: {exc}")
-
 
 def restore_from_backup(backup: Backup) -> None:
     """
