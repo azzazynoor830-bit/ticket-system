@@ -2295,7 +2295,7 @@ def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> N
 
             email_size_kb = len(stripped_json_bytes) // 1024
             _backup_local = utc_to_local(backup.created_at)
-            filename = f"backup_{_backup_local.strftime('%Y%m%d_%H%M%S')}.json"
+            filename = f"backup_{_backup_local.strftime('%Y%m%d_%H%M%S')}.txt"
             subject  = f"[Ticket System] Backup -- {_backup_local.strftime('%Y-%m-%d %H:%M')} ({backup.source})"
             body_text = (
                 f"نسخة احتياطية تلقائية من نظام التذاكر\n\n"
