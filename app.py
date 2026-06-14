@@ -1624,7 +1624,7 @@ def send_notification(user_id, ticket_id, message, event: str = ""):
     db.session.add(notif)
 
     # ── Optional email delivery ───────────────────────────────────────────────
-    if event in _EMAIL_EVENTS and app.config.get("MAIL_SERVER"):
+    if event in _EMAIL_EVENTS and os.environ.get("BREVO_API_KEY"):
         try:
             recipient = db.session.get(User, user_id)
             if recipient and recipient.email:
