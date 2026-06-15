@@ -2228,10 +2228,12 @@ def create_backup(source: str = "auto") -> Backup | None:
             )
 
             # ── 6. Send backup as email attachment (background thread) ──
+            # Email is only sent for manual backups; automatic (scheduled)
+            # backups are silently skipped to avoid daily inbox noise.
             import threading
             backup_thread = threading.Thread(
                 target=send_backup_email,
-                args=(backup.id, json_bytes, gzip_bytes),
+                args=(backup.id, json_bytes, gzip_bytes, source),
                 daemon=True,
             )
             backup_thread.start()
@@ -2244,22 +2246,31 @@ def create_backup(source: str = "auto") -> Backup | None:
         return None
 
 
-def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> None:
+def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes, source: str = "manual") -> None:
     """
     Send the backup as a gzip-compressed JSON attachment to BACKUP_MAIL_TO
     via Brevo API (same provider used by send_email / password reset).
     Runs in a background thread -- accepts backup_id (not the ORM object)
     to avoid detached-instance errors across thread boundaries.
     Silently skipped if BREVO_API_KEY or BACKUP_MAIL_TO are not configured.
+    Silently skipped for automatic (scheduled) backups -- only manual backups
+    trigger an email so the admin inbox is not flooded with daily messages.
 
     The email attachment intentionally excludes file_data_b64 (binary
     attachment content) to keep the email size reasonable.
     The full backup including file bytes is always stored in Neon and
     can be restored from there.
 
+    backup_id   -- primary key of the Backup record (fetched fresh inside the thread)
     json_bytes  -- uncompressed JSON (used to strip file_data_b64 before sending)
-    gzip_bytes  -- compressed bytes that become the .json.gz attachment
+    gzip_bytes  -- compressed bytes (kept for future use; Brevo rejects .gz directly)
+    source      -- "manual" | "auto" -- email is only sent when source == "manual"
     """
+    # Only send email for manual backups
+    if source != "manual":
+        app.logger.debug("[Backup] Auto backup -- email skipped (manual-only policy).")
+        return
+
     import json as _json_email
     import base64 as _base64
     import requests as _requests
