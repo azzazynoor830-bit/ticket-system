@@ -638,6 +638,18 @@ TRANSLATIONS = {
         "flash_ticket_restored": "Ticket [{num}] restored successfully.",
         "flash_dept_restored":   "Department \'{name}\' restored.",
         "err_openpyxl":          "openpyxl is not installed. Run: pip install openpyxl",
+        # ── Settings page ─────────────────────────────────────────────────────
+        "settings":                  "Settings",
+        "settings_title":            "System Settings",
+        "settings_sla_section":      "SLA Hours by Priority",
+        "settings_sla_hint":         "Business hours except Critical (wall-clock hours).",
+        "settings_sla_low":          "Low Priority (hours)",
+        "settings_sla_medium":       "Medium Priority (hours)",
+        "settings_sla_high":         "High Priority (hours)",
+        "settings_sla_critical":     "Critical Priority (hours — wall-clock)",
+        "settings_save":             "Save Settings",
+        "flash_settings_saved":      "Settings saved successfully.",
+        "flash_settings_error":      "Failed to save settings — check server logs.",
     },
     "ar": {
         "app_title":         "نظام التذاكر",
@@ -945,6 +957,18 @@ TRANSLATIONS = {
         "flash_ticket_restored": "تم استعادة التذكرة [{num}] بنجاح.",
         "flash_dept_restored":   "تم استعادة القسم \'{name}\' بنجاح.",
         "err_openpyxl":          "مكتبة openpyxl غير مثبتة. قم بتشغيل: pip install openpyxl",
+        # ── Settings page ─────────────────────────────────────────────────────
+        "settings":                  "الإعدادات",
+        "settings_title":            "إعدادات النظام",
+        "settings_sla_section":      "ساعات SLA حسب الأولوية",
+        "settings_sla_hint":         "ساعات العمل ماعدا الحرجة (ساعات فعلية).",
+        "settings_sla_low":          "الأولوية المنخفضة (ساعات)",
+        "settings_sla_medium":       "الأولوية المتوسطة (ساعات)",
+        "settings_sla_high":         "الأولوية العالية (ساعات)",
+        "settings_sla_critical":     "الأولوية الحرجة (ساعات فعلية)",
+        "settings_save":             "حفظ الإعدادات",
+        "flash_settings_saved":      "تم حفظ الإعدادات بنجاح.",
+        "flash_settings_error":      "فشل حفظ الإعدادات — راجع سجلات الخادم.",
     },
 }
 
@@ -1186,6 +1210,30 @@ SLA_HOURS = {
     "Critical": 2,       # 2 real hours (always-on)
 }
 
+_SLA_SETTING_KEYS = {
+    "Low":      "sla_hours_low",
+    "Medium":   "sla_hours_medium",
+    "High":     "sla_hours_high",
+    "Critical": "sla_hours_critical",
+}
+
+def get_sla_hours(priority: str) -> float:
+    """
+    Return the SLA hours for *priority*, reading from DB (SystemSetting)
+    when available, falling back to the SLA_HOURS dict if not set or if
+    called outside an application/request context (e.g. migrations).
+    """
+    default = SLA_HOURS.get(priority, 40)
+    try:
+        key = _SLA_SETTING_KEYS.get(priority)
+        if key is None:
+            return default
+        raw = SystemSetting.get(key)
+        return float(raw) if raw is not None else default
+    except Exception:
+        # DB not ready (first migration, tests, etc.) — fall back silently
+        return default
+
 # ── Business-hours configuration ─────────────────────────────────────────────
 # Adjust these to match the client's working schedule.
 # WORK_DAYS: 0=Monday … 6=Sunday  (Egypt: Sat–Thu, weekends=Fri+Sat)
@@ -1314,7 +1362,7 @@ class Ticket(db.Model):
 
     @property
     def sla_deadline(self):
-        hours = SLA_HOURS.get(self.priority, 40)
+        hours = get_sla_hours(self.priority)
         if self.priority == "Critical":
             # Critical is always-on: count raw wall-clock hours, not business hours
             return self.created_at + timedelta(hours=hours)
@@ -1444,6 +1492,43 @@ class TicketCounter(db.Model):
 
     def __repr__(self):
         return f"<TicketCounter year={self.year} last={self.last_number}>"
+
+
+# ─────────────────────────────────────────────
+# SYSTEM SETTINGS MODEL
+# ─────────────────────────────────────────────
+
+class SystemSetting(db.Model):
+    """
+    Generic key/value store for runtime-configurable settings.
+    All values are stored as strings; the application is responsible
+    for casting to the correct type when reading.
+    """
+    __tablename__ = "system_settings"
+
+    key        = db.Column(db.String(100), primary_key=True)
+    value      = db.Column(db.Text,        nullable=False)
+    updated_at = db.Column(db.DateTime,    default=lambda: utc_now(),
+                           onupdate=lambda: utc_now(), nullable=False)
+
+    @classmethod
+    def get(cls, key, default=None):
+        """Return the string value for *key*, or *default* if not found."""
+        row = cls.query.get(key)
+        return row.value if row else default
+
+    @classmethod
+    def set(cls, key, value):
+        """Upsert a setting.  Caller must commit the session."""
+        row = cls.query.get(key)
+        if row:
+            row.value      = str(value)
+            row.updated_at = utc_now()
+        else:
+            db.session.add(cls(key=key, value=str(value)))
+
+    def __repr__(self):
+        return f"<SystemSetting {self.key}={self.value!r}>"
 
 
 # ─────────────────────────────────────────────
@@ -2665,6 +2750,11 @@ TEMPLATES = {
         <li class="nav-item">
           <a class="nav-link text-danger" href="{{ url_for('admin.deleted_tickets') }}">
             <i class="bi bi-trash3"></i> Deleted
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="{{ url_for('admin.settings') }}">
+            <i class="bi bi-gear-fill"></i> {{ t('settings') }}
           </a>
         </li>
         {% endif %}
@@ -7588,6 +7678,100 @@ def delete_backup(backup_id):
         app.logger.error(f"[Backup] delete failed for id={backup_id}: {exc}")
         flash(t("flash_delete_error"), "danger")
     return redirect(url_for("admin.backups_list"))
+
+
+# ── System Settings ───────────────────────────
+
+_SETTINGS_TEMPLATE = """
+{% extends 'base.html' %}
+{% block title %}{{ t('settings_title') }} — {{ t('app_title') }}{% endblock %}
+{% block content %}
+<div class="container py-4" style="max-width:680px">
+  <h4 class="mb-4 fw-bold">
+    <i class="bi bi-gear-fill me-2 text-primary"></i>{{ t('settings_title') }}
+  </h4>
+
+  <form method="POST" action="{{ url_for('admin.settings') }}">
+    {{ csrf_token_input() | safe }}
+
+    {# ── SLA section ─────────────────────────────────────────────────────── #}
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-header bg-white border-bottom fw-semibold py-3">
+        <i class="bi bi-clock-history me-2 text-warning"></i>{{ t('settings_sla_section') }}
+      </div>
+      <div class="card-body">
+        <p class="text-muted small mb-3">{{ t('settings_sla_hint') }}</p>
+
+        {% set priorities = [
+          ('sla_hours_low',      t('settings_sla_low')),
+          ('sla_hours_medium',   t('settings_sla_medium')),
+          ('sla_hours_high',     t('settings_sla_high')),
+          ('sla_hours_critical', t('settings_sla_critical')),
+        ] %}
+
+        {% for key, label in priorities %}
+        <div class="mb-3 row align-items-center">
+          <label class="col-sm-7 col-form-label fw-medium">{{ label }}</label>
+          <div class="col-sm-5">
+            <div class="input-group">
+              <input type="number" class="form-control" name="{{ key }}"
+                     min="0.5" step="0.5"
+                     value="{{ sla_values[key] }}" required>
+              <span class="input-group-text text-muted">h</span>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="d-flex gap-2">
+      <button type="submit" class="btn btn-primary px-4">
+        <i class="bi bi-check-lg me-1"></i>{{ t('settings_save') }}
+      </button>
+      <a href="{{ url_for('admin.overview') }}" class="btn btn-outline-secondary px-4">
+        {{ t('cancel') }}
+      </a>
+    </div>
+  </form>
+</div>
+{% endblock %}
+"""
+
+@admin_bp.route("/settings", methods=["GET", "POST"])
+@admin_required
+def settings():
+    """Read/write configurable system settings (SLA hours, etc.)."""
+    # Current values — read from DB with fallback to SLA_HOURS defaults
+    sla_keys = list(_SLA_SETTING_KEYS.values())   # low, medium, high, critical
+    default_map = {v: SLA_HOURS[k] for k, v in _SLA_SETTING_KEYS.items()}
+
+    if request.method == "POST":
+        try:
+            for key in sla_keys:
+                raw = request.form.get(key, "").strip()
+                val = float(raw)
+                if val <= 0:
+                    raise ValueError(f"Value for {key} must be positive")
+                SystemSetting.set(key, val)
+            db.session.commit()
+            flash(t("flash_settings_saved"), "success")
+        except Exception as exc:
+            db.session.rollback()
+            app.logger.error(f"[Settings] save failed: {exc}")
+            flash(t("flash_settings_error"), "danger")
+        return redirect(url_for("admin.settings"))
+
+    # Build current values dict for template
+    sla_values = {}
+    for key in sla_keys:
+        raw = SystemSetting.get(key)
+        sla_values[key] = float(raw) if raw is not None else default_map[key]
+
+    return render_template_string(
+        _SETTINGS_TEMPLATE,
+        sla_values=sla_values,
+    )
 
 
 # ── API (HTMX) ────────────────────────────────
