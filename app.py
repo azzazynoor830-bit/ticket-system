@@ -2228,12 +2228,10 @@ def create_backup(source: str = "auto") -> Backup | None:
             )
 
             # ── 6. Send backup as email attachment (background thread) ──
-            # Email is only sent for manual backups; automatic (scheduled)
-            # backups are silently skipped to avoid daily inbox noise.
             import threading
             backup_thread = threading.Thread(
                 target=send_backup_email,
-                args=(backup.id, json_bytes, gzip_bytes, source),
+                args=(backup.id, json_bytes, gzip_bytes),
                 daemon=True,
             )
             backup_thread.start()
@@ -2246,31 +2244,22 @@ def create_backup(source: str = "auto") -> Backup | None:
         return None
 
 
-def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes, source: str = "manual") -> None:
+def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> None:
     """
     Send the backup as a gzip-compressed JSON attachment to BACKUP_MAIL_TO
     via Brevo API (same provider used by send_email / password reset).
     Runs in a background thread -- accepts backup_id (not the ORM object)
     to avoid detached-instance errors across thread boundaries.
     Silently skipped if BREVO_API_KEY or BACKUP_MAIL_TO are not configured.
-    Silently skipped for automatic (scheduled) backups -- only manual backups
-    trigger an email so the admin inbox is not flooded with daily messages.
 
     The email attachment intentionally excludes file_data_b64 (binary
     attachment content) to keep the email size reasonable.
     The full backup including file bytes is always stored in Neon and
     can be restored from there.
 
-    backup_id   -- primary key of the Backup record (fetched fresh inside the thread)
     json_bytes  -- uncompressed JSON (used to strip file_data_b64 before sending)
-    gzip_bytes  -- compressed bytes (kept for future use; Brevo rejects .gz directly)
-    source      -- "manual" | "auto" -- email is only sent when source == "manual"
+    gzip_bytes  -- compressed bytes that become the .json.gz attachment
     """
-    # Only send email for manual backups
-    if source != "manual":
-        app.logger.debug("[Backup] Auto backup -- email skipped (manual-only policy).")
-        return
-
     import json as _json_email
     import base64 as _base64
     import requests as _requests
@@ -4928,8 +4917,6 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
           <th>{{ t('backup_date') }}</th>
           <th class="text-center">{{ t('backup_size') }}</th>
           <th class="text-center">{{ t('backup_source') }}</th>
-          <th class="text-center">{{ t('backup_email') }}</th>
-          <th class="text-center">{{ t('backup_drive') }}</th>
           <th class="text-end">{{ t('backup_actions') }}</th>
         </tr>
       </thead>
@@ -4961,24 +4948,6 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
                 <span class="badge bg-primary">{{ t('backup_source_manual') }}</span>
               {% else %}
                 <span class="badge bg-light text-dark border">{{ t('backup_source_auto') }}</span>
-              {% endif %}
-            </td>
-
-            {# Email status #}
-            <td class="text-center">
-              {% if b.email_sent %}
-                <span class="text-success small"><i class="bi bi-envelope-check-fill me-1"></i>{{ t('backup_email_sent') }}</span>
-              {% else %}
-                <span class="text-muted small"><i class="bi bi-envelope-slash me-1"></i>{{ t('backup_email_none') }}</span>
-              {% endif %}
-            </td>
-
-            {# Google Drive status #}
-            <td class="text-center">
-              {% if b.gdrive_id %}
-                <span class="text-success small"><i class="bi bi-google me-1"></i>{{ t('backup_drive_saved') }}</span>
-              {% else %}
-                <span class="text-muted small"><i class="bi bi-cloud-slash me-1"></i>{{ t('backup_drive_none') }}</span>
               {% endif %}
             </td>
 
