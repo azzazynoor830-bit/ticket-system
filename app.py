@@ -2260,6 +2260,13 @@ def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> N
     json_bytes  -- uncompressed JSON (used to strip file_data_b64 before sending)
     gzip_bytes  -- compressed bytes that become the .json.gz attachment
     """
+    # ── DISABLED: change to True to re-enable backup emails ─────────────────
+    _BACKUP_EMAIL_ENABLED = False
+    if not _BACKUP_EMAIL_ENABLED:
+        app.logger.debug("[Backup] Backup email is disabled (_BACKUP_EMAIL_ENABLED=False).")
+        return
+    # ────────────────────────────────────────────────────────────────────────
+
     import json as _json_email
     import base64 as _base64
     import requests as _requests
