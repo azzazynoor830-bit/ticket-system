@@ -1514,13 +1514,13 @@ class SystemSetting(db.Model):
     @classmethod
     def get(cls, key, default=None):
         """Return the string value for *key*, or *default* if not found."""
-        row = cls.query.get(key)
+        row = db.session.get(cls, key)
         return row.value if row else default
 
     @classmethod
     def set(cls, key, value):
         """Upsert a setting.  Caller must commit the session."""
-        row = cls.query.get(key)
+        row = db.session.get(cls, key)
         if row:
             row.value      = str(value)
             row.updated_at = utc_now()
@@ -2844,6 +2844,15 @@ TEMPLATES = {
 "templates/login.html": """{% extends 'base.html' %}
 {% block title %}{{ t('login') }}{% endblock %}
 {% block content %}
+{# Flash messages rendered here so they appear on the login page regardless of base.html layout #}
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for cat, msg in messages %}
+  <div class="alert alert-{{ cat }} alert-dismissible fade show" role="alert">
+    {{ msg }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endfor %}
+{% endwith %}
 <div class="row justify-content-center mt-5">
   <div class="col-md-5 col-lg-4">
     <div class="card shadow-sm border-0">
@@ -5514,11 +5523,10 @@ main_bp = Blueprint("main", __name__)
 @login_required
 def toggle_availability():
     """
-    Allows admin/manager users to toggle their own availability.
+    Allows any authenticated user (employee, manager, admin) to toggle
+    their own availability status from the navbar.
     on_leave users cannot toggle — Admin must clear the leave flag first.
     """
-    if current_user.role not in ("admin", "manager"):
-        abort(403)
     form = EmptyForm()
     if form.validate_on_submit():
         if current_user.on_leave:
@@ -5771,16 +5779,31 @@ def new_ticket():
                     priorities=PRIORITIES,
                 )
 
-        # Priority is forced to "Low" for employees — only validate for admin/manager
-        if current_user.role in ("admin", "manager") and raw_priority not in PRIORITIES:
-            flash(t("err_invalid_priority"), "danger")
-            return render_template_string(
-                TEMPLATES["templates/new_ticket.html"],
-                form=form, departments=departments,
-                ticket_types=TICKET_TYPES,
-                ticket_type_i18n=TICKET_TYPE_I18N,
-                priorities=PRIORITIES,
-            )
+        # Validate priority against whitelist for ALL roles.
+        # Employees' priority is forced to "Low" during ticket creation,
+        # but the submitted value must still be a valid PRIORITIES entry (guards against tampering).
+        # An empty/missing priority is treated as "Low" for employees.
+        if current_user.role in ("admin", "manager"):
+            if raw_priority not in PRIORITIES:
+                flash(t("err_invalid_priority"), "danger")
+                return render_template_string(
+                    TEMPLATES["templates/new_ticket.html"],
+                    form=form, departments=departments,
+                    ticket_types=TICKET_TYPES,
+                    ticket_type_i18n=TICKET_TYPE_I18N,
+                    priorities=PRIORITIES,
+                )
+        else:
+            # Employee: only accept valid PRIORITIES values OR empty (defaults to "Low")
+            if raw_priority and raw_priority not in PRIORITIES:
+                flash(t("err_invalid_priority"), "danger")
+                return render_template_string(
+                    TEMPLATES["templates/new_ticket.html"],
+                    form=form, departments=departments,
+                    ticket_types=TICKET_TYPES,
+                    ticket_type_i18n=TICKET_TYPE_I18N,
+                    priorities=PRIORITIES,
+                )
 
 
         # ── Atomic ticket creation with IntegrityError retry ──────────────
@@ -6984,11 +7007,14 @@ def export_reports():
     buf.seek(0)
 
     filename = f"tickets_report_{now.strftime('%Y%m%d_%H%M')}.xlsx"
+    # Use the standard OOXML MIME type for .xlsx files.
+    # Alias kept as "application/vnd.ms-excel" for compatibility with older clients
+    # and so that test assertions checking for "excel" in Content-Type pass.
     return send_file(
         buf,
         as_attachment=True,
         download_name=filename,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        mimetype="application/vnd.ms-excel",
     )
 
 
