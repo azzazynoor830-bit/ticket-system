@@ -94,7 +94,10 @@ class BaseConfig:
     # become stale and raise OperationalError on the next use.
     # pool_pre_ping=True issues a cheap "SELECT 1" before lending a connection,
     # transparently recycling any dead connections without surfacing errors to users.
-    SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True}
+    # pool_recycle=300 forces the pool to replace connections older than 5 minutes,
+    # preventing server-side timeouts from Neon's idle connection killer before
+    # pool_pre_ping has a chance to detect and recycle them.
+    SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True, "pool_recycle": 300}
 
     # ── Flask-Mail ───────────────────────────────────────────────────────────
     # Set these env vars in production.  When MAIL_SERVER is absent, email
@@ -201,8 +204,10 @@ class ProductionConfig(BaseConfig):
     LOG_FOLDER    = "/tmp/tickets_logs"   # /tmp دايماً writable في أي container
 
 
-# ── Select config based on FLASK_ENV ─────────
-_env = os.environ.get("FLASK_ENV", "development").lower()
+# ── Select config based on APP_ENV (FLASK_ENV is deprecated in Flask 2.3+) ─────────
+# APP_ENV is the preferred env var; FLASK_ENV is accepted as a fallback so existing
+# Railway deployments keep working without a config change.
+_env = (os.environ.get("APP_ENV") or os.environ.get("FLASK_ENV", "development")).lower()
 if _env == "production":
     _config = ProductionConfig()
 else:
@@ -1778,14 +1783,22 @@ def auto_assign_ticket(ticket):
             )
         return None
 
-    # Count open tickets per candidate (workload across all departments)
-    def open_ticket_count(user):
-        return user.tickets_assigned.filter(
+    # Count open tickets per candidate in a single query (avoids N+1).
+    # One SELECT with GROUP BY instead of 1 COUNT per candidate.
+    from sqlalchemy import func as _func
+    candidate_ids = [u.id for u in candidates]
+    counts_rows = (
+        db.session.query(Ticket.assigned_to, _func.count(Ticket.id))
+        .filter(
+            Ticket.assigned_to.in_(candidate_ids),
             Ticket.status.in_(open_statuses),
             Ticket.is_deleted == False,
-        ).count()
-
-    chosen = min(candidates, key=open_ticket_count)
+        )
+        .group_by(Ticket.assigned_to)
+        .all()
+    )
+    workload = {user_id: cnt for user_id, cnt in counts_rows}
+    chosen = min(candidates, key=lambda u: workload.get(u.id, 0))
     return chosen
 
 
@@ -2257,6 +2270,12 @@ def create_backup(source: str = "auto") -> Backup | None:
                     }
                     for n in Notification.query.all()
                 ],
+                # SLA hours, business hours, and other runtime settings.
+                # Included so restore_from_backup() can fully recreate the DB state.
+                "system_settings": [
+                    {"key": s.key, "value": s.value}
+                    for s in SystemSetting.query.all()
+                ],
             }
 
             # ── 2. Dump to JSON then compress ───────────────────────
@@ -2626,6 +2645,16 @@ def restore_from_backup(backup: Backup) -> None:
                 "is_read":    n["is_read"],
                 "created_at": n.get("created_at"),
             })
+
+        # 9. System Settings (SLA hours, business hours, etc.)
+        # Backups created before this fix won't have this key; silently skip.
+        # Uses UPSERT so existing settings (e.g. from a partial setup) are overwritten.
+        for ss in data.get("system_settings", []):
+            db.session.execute(db.text(
+                "INSERT INTO system_settings (key, value, updated_at) "
+                "VALUES (:key, :value, :ts) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+            ), {"key": ss["key"], "value": ss["value"], "ts": data.get("created_at")})
 
         # ── Rebuild ticket_counter from restored ticket numbers ──────────────────
         # Parse every ticket_number (format TKT-YYYY-NNNN), find the highest
@@ -7030,7 +7059,7 @@ def search():
     Falls back to ILIKE for SQLite (automated testing only).
     GIN index to add after first migration:
       CREATE INDEX idx_tickets_fts ON tickets
-        USING GIN(to_tsvector('english', coalesce(title,'') || ' ' || coalesce(description,'')));
+        USING GIN(to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,'')));
     """
     from sqlalchemy import func   # required for plainto_tsquery / to_tsvector (PostgreSQL FTS)
     q    = request.args.get("q", "").strip()
@@ -7044,11 +7073,11 @@ def search():
         is_postgres = db.engine.dialect.name == "postgresql"
         if is_postgres:
             # ── PostgreSQL full-text search via tsvector ─────────────
-            tsq = func.plainto_tsquery("english", q)
+            tsq = func.plainto_tsquery("simple", q)
             matching_comment_ids = (
                 db.session.query(Comment.ticket_id)
                 .filter(
-                    func.to_tsvector("english",
+                    func.to_tsvector("simple",
                         db.func.coalesce(Comment.body, "")
                     ).op("@@")(tsq)
                 )
@@ -7057,7 +7086,7 @@ def search():
             base_query = base_query.filter(
                 db.or_(
                     func.to_tsvector(
-                        "english",
+                        "simple",
                         db.func.coalesce(Ticket.title, "") + " " +
                         db.func.coalesce(Ticket.description, "")
                     ).op("@@")(tsq),
@@ -8034,7 +8063,7 @@ def seed_command():
     click.echo("\n👉 Open your browser at http://127.0.0.1:5000 and create the admin account.")
     click.echo("\n📌 Performance tip — run this SQL once on PostgreSQL for faster full-text search (TC-141):")
     click.echo("   CREATE INDEX IF NOT EXISTS idx_tickets_fts ON tickets")
-    click.echo("     USING GIN(to_tsvector('english', coalesce(title,'') || ' ' || coalesce(description,'')));")
+    click.echo("     USING GIN(to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,'')));")
 
 
 # ─────────────────────────────────────────────
@@ -8066,6 +8095,7 @@ def ensure_columns():
         ("attachments", "file_data",           "BYTEA",            "BLOB",             None),  # Railway DB storage (legacy)
         ("attachments", "gdrive_file_id",     "VARCHAR(100)",     "TEXT",             None),  # Google Drive file ID
         ("backups",     "email_sent",          "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 0"),
+        ("departments", "allowed_types",       "TEXT",             "TEXT",             None),  # JSON list of allowed ticket types
     ]
     with app.app_context():
         is_postgres = db.engine.dialect.name == "postgresql"
@@ -8108,7 +8138,7 @@ def ensure_columns():
                 try:
                     conn.execute(db.text(
                         "CREATE INDEX IF NOT EXISTS idx_tickets_fts ON tickets "
-                        "USING GIN(to_tsvector('english', "
+                        "USING GIN(to_tsvector('simple', "
                         "coalesce(title,'') || ' ' || coalesce(description,'')));"
                     ))
                     conn.commit()
