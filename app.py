@@ -303,6 +303,20 @@ db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 csrf = CSRFProtect(app)
 
+@app.before_request
+def enforce_password_change():
+    """
+    Block navigation for users who must change their password.
+    Allowed endpoints: force_change_password, logout, static, health.
+    """
+    from flask_login import current_user
+    if (current_user.is_authenticated
+            and getattr(current_user, "must_change_password", False)):
+        allowed = {"auth.force_change_password", "auth.logout", "static", "health_check"}
+        if request.endpoint not in allowed:
+            return redirect(url_for("auth.force_change_password"))
+
+
 @app.after_request
 def add_security_headers(response):
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
@@ -625,6 +639,8 @@ TRANSLATIONS = {
         "err_reset_invalid":     "The password reset link is invalid or has expired (1 hour limit).",
         "err_user_not_found":    "User not found.",
         "flash_pw_updated":      "Password updated successfully. Please log in.",
+        "must_change_pw_notice": "Your administrator has set a temporary password. Please set a new password before continuing.",
+        "change_password":       "Change Password",
         "flash_welcome":         "Welcome {name}! Account created successfully. Please log in.",
         "err_invalid_priority":  "Invalid priority value.",
         "err_title_empty":       "Title cannot be empty.",
@@ -944,6 +960,8 @@ TRANSLATIONS = {
         "err_reset_invalid":     "رابط إعادة التعيين غير صالح أو انتهت صلاحيته (حد أقصى ساعة).",
         "err_user_not_found":    "المستخدم غير موجود.",
         "flash_pw_updated":      "تم تحديث كلمة المرور بنجاح. يرجى تسجيل الدخول.",
+        "must_change_pw_notice": "تم تعيين كلمة مرور مؤقتة من قبل المسؤول. يرجى تغيير كلمة المرور قبل المتابعة.",
+        "change_password":       "تغيير كلمة المرور",
         "flash_welcome":         "مرحباً {name}! تم إنشاء الحساب بنجاح. يرجى تسجيل الدخول.",
         "err_invalid_priority":  "قيمة الأولوية غير صالحة.",
         "err_title_empty":       "العنوان لا يمكن أن يكون فارغاً.",
@@ -1174,6 +1192,9 @@ class User(UserMixin, db.Model):
     # Tracks last password change — reset tokens issued before this timestamp are invalid (one-time use)
     # run: flask db migrate -m "add password_changed_at to users" && flask db upgrade
     password_changed_at = db.Column(db.DateTime, nullable=True)
+    # Force password change on next login — set True when admin creates/resets a user's password
+    # run: flask db migrate -m "add must_change_password to users" && flask db upgrade
+    must_change_password = db.Column(db.Boolean, default=False, nullable=False)
 
     department      = db.relationship("Department", back_populates="users",
                                       foreign_keys=[department_id])
@@ -1453,6 +1474,51 @@ class Notification(db.Model):
 
     def __repr__(self):
         return f"<Notification user={self.user_id} read={self.is_read}>"
+
+
+# ─────────────────────────────────────────────
+# ADMIN AUDIT LOG MODEL
+# ─────────────────────────────────────────────
+
+class AdminLog(db.Model):
+    """
+    Audit trail for administrative actions that are NOT ticket-related.
+    Covers: user create/edit/deactivate/role-change, department CRUD, settings changes.
+    Immutable by design — no update or delete routes touch this table.
+    """
+    __tablename__ = "admin_logs"
+
+    id          = db.Column(db.Integer, primary_key=True)
+    actor_id    = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    action      = db.Column(db.String(60),  nullable=False)   # e.g. user_created, role_changed
+    target_type = db.Column(db.String(30),  nullable=False)   # user / department / settings
+    target_id   = db.Column(db.Integer,     nullable=True)    # PK of affected row (None for settings)
+    target_name = db.Column(db.String(200), nullable=True)    # human-readable label at time of action
+    old_value   = db.Column(db.Text,        nullable=True)
+    new_value   = db.Column(db.Text,        nullable=True)
+    created_at  = db.Column(db.DateTime, default=lambda: utc_now(), index=True)
+
+    actor = db.relationship("User", foreign_keys=[actor_id])
+
+    def __repr__(self):
+        return f"<AdminLog {self.action} by={self.actor_id}>"
+
+
+def write_admin_log(action, target_type, target_id=None, target_name=None,
+                    old_value=None, new_value=None):
+    """Append one row to admin_logs. Caller must commit the session."""
+    from flask_login import current_user
+    entry = AdminLog(
+        actor_id    = current_user.id,
+        action      = action,
+        target_type = target_type,
+        target_id   = target_id,
+        target_name = str(target_name) if target_name is not None else None,
+        old_value   = str(old_value)   if old_value   is not None else None,
+        new_value   = str(new_value)   if new_value   is not None else None,
+    )
+    db.session.add(entry)
+    return entry
 
 
 # ─────────────────────────────────────────────
@@ -2784,6 +2850,11 @@ TEMPLATES = {
         <li class="nav-item">
           <a class="nav-link" href="{{ url_for('admin.settings') }}">
             <i class="bi bi-gear-fill"></i> {{ t('settings') }}
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="{{ url_for('admin.admin_log') }}">
+            <i class="bi bi-journal-text"></i> {{ t('audit_trail') }}
           </a>
         </li>
         {% endif %}
@@ -4366,6 +4437,44 @@ input, textarea, select {
   </div>
 </div>
 
+<!-- Trend Chart: Tickets created per day — last 30 days -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header fw-semibold">
+    <i class="bi bi-graph-up text-primary me-1"></i> Tickets Created — Last 30 Days
+  </div>
+  <div class="card-body">
+    <canvas id="trendChart" height="90"></canvas>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+(function(){
+  var ctx = document.getElementById("trendChart").getContext("2d");
+  new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: {{ trend_labels | tojson }},
+      datasets: [{
+        label: "Tickets",
+        data: {{ trend_values | tojson }},
+        backgroundColor: "rgba(13,110,253,0.25)",
+        borderColor: "rgba(13,110,253,0.85)",
+        borderWidth: 1,
+        borderRadius: 3
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } },
+        x: { ticks: { maxRotation: 45 } }
+      }
+    }
+  });
+})();
+</script>
+
 <!-- Row 1: Tickets by Type + SLA Compliance -->
 <div class="row g-4 mb-4">
 
@@ -5451,6 +5560,9 @@ def login():
             # Only allow relative paths (start with /) within the same app
             if next_page and (not next_page.startswith("/") or next_page.startswith("//")):
                 next_page = None
+            # Force password change if admin set must_change_password flag
+            if user.must_change_password:
+                return redirect(url_for("auth.force_change_password"))
             return redirect(next_page or url_for("main.dashboard"))
         flash(t("flash_login_error"), "danger")
     return render_template_string(TEMPLATES["templates/login.html"], form=form)
@@ -5461,6 +5573,74 @@ def logout():
     logout_user()
     flash(t("flash_logged_out"), "success")
     return redirect(url_for("auth.login"))
+
+
+@auth_bp.route("/force-change-password", methods=["GET", "POST"])
+@login_required
+def force_change_password():
+    """
+    Shown after first login when admin set must_change_password=True.
+    User cannot navigate away — every page checks this flag and redirects here.
+    """
+    if not current_user.must_change_password:
+        return redirect(url_for("main.dashboard"))
+    form = EmptyForm()
+    error = None
+    if request.method == "POST" and form.validate_on_submit():
+        pw  = request.form.get("password", "")
+        pw2 = request.form.get("password2", "")
+        errors = validate_password(pw)
+        if pw != pw2:
+            errors.append(t("err_pw_no_match"))
+        if errors:
+            error = " | ".join(errors)
+        else:
+            current_user.set_password(pw)
+            current_user.must_change_password = False
+            db.session.commit()
+            flash(t("flash_pw_updated"), "success")
+            return redirect(url_for("main.dashboard"))
+    html = """{% extends 'base.html' %}
+{% block title %}Change Password{% endblock %}
+{% block content %}
+<div class="row justify-content-center mt-5">
+  <div class="col-md-5 col-lg-4">
+    <div class="card shadow-sm border-0">
+      <div class="card-body p-4">
+        <div class="text-center mb-4">
+          <i class="bi bi-shield-lock-fill text-warning" style="font-size:2.5rem"></i>
+          <h5 class="mt-2 fw-bold">{{ t('change_password') }}</h5>
+          <p class="text-muted small">{{ t('must_change_pw_notice') }}</p>
+        </div>
+        {% if error %}
+        <div class="alert alert-danger small">{{ error }}</div>
+        {% endif %}
+        <form method="POST">
+          {{ form.hidden_tag() }}
+          <div class="mb-3">
+            <label class="form-label">{{ t('password') }} <span class="text-danger">*</span></label>
+            <div class="input-group">
+              <input type="password" name="password" id="fcp_pw" class="form-control" required autofocus>
+              <button type="button" class="btn btn-outline-secondary"
+                      onclick="var e=document.getElementById('fcp_pw');var i=document.getElementById('fcp_ico');if(e.type==='password'){e.type='text';i.className='bi bi-eye-slash';}else{e.type='password';i.className='bi bi-eye';}">
+                <i id="fcp_ico" class="bi bi-eye"></i>
+              </button>
+            </div>
+            <div class="form-text">{{ t('pw_min_chars') }} · {{ t('pw_uppercase') }} · {{ t('pw_digit') }} · {{ t('pw_special') }}</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">{{ t('confirm_password') }} <span class="text-danger">*</span></label>
+            <input type="password" name="password2" class="form-control" required>
+          </div>
+          <button type="submit" class="btn btn-warning w-100 fw-bold">{{ t('save_changes') }}</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+"""
+    return render_template_string(html, form=form, error=error)
 
 
 # ── MAIN ──────────────────────────────────────
@@ -6733,6 +6913,28 @@ def reports():
         joinedload(Ticket.assignee),    # template: tk.assignee.name    — without this: 1 SELECT per row
     ).all()
 
+    # ── 6. Tickets created per day — last 30 days (for trend chart) ──
+    from datetime import date, timedelta as _td
+    today_local = local_now().date()
+    thirty_days_ago = today_local - _td(days=29)
+    # Convert to UTC-naive for DB comparison
+    from_utc = local_to_utc(datetime.combine(thirty_days_ago, datetime.min.time()))
+    trend_q = (
+        db.session.query(
+            func.date(Ticket.created_at).label("day"),
+            func.count(Ticket.id).label("cnt"),
+        )
+        .filter(Ticket.is_deleted == False, Ticket.created_at >= from_utc)
+    )
+    if dept_filter:
+        trend_q = trend_q.filter(Ticket.department_id == dept_filter)
+    trend_rows = trend_q.group_by(func.date(Ticket.created_at)).order_by(func.date(Ticket.created_at)).all()
+    # Build full 30-day series (fill missing days with 0)
+    trend_map = {str(r.day): r.cnt for r in trend_rows}
+    trend_labels = [(thirty_days_ago + _td(days=i)).strftime("%m/%d") for i in range(30)]
+    trend_dates  = [(thirty_days_ago + _td(days=i)).isoformat() for i in range(30)]
+    trend_values = [trend_map.get(d, 0) for d in trend_dates]
+
     return render_template_string(
         TEMPLATES["templates/reports.html"],
         by_type=by_type,
@@ -6740,6 +6942,8 @@ def reports():
         per_agent=per_agent,
         sla_compliance=sla_compliance,
         overdue_tickets=overdue_tickets,
+        trend_labels=trend_labels,
+        trend_values=trend_values,
         now=now.strftime("%Y-%m-%d %H:%M"),
     )
 
@@ -7176,7 +7380,10 @@ def new_user():
                 department_id = request.form.get("department_id") or None,
             )
             u.set_password(password)
+            u.must_change_password = True  # force password change on first login
             db.session.add(u)
+            write_admin_log("user_created", "user", target_name=u.email,
+                            new_value=f"role={u.role} dept={u.department_id}")
             db.session.commit()
             flash(t("flash_user_ok", name=u.name), "success")
             return redirect(url_for("admin.users"))
@@ -7296,6 +7503,8 @@ def edit_user(user_id):
                     flash(err, "danger")
                 return redirect(request.url)
             u.set_password(request.form["password"])
+        write_admin_log("user_edited", "user", target_id=u.id, target_name=u.email,
+                        new_value=f"role={u.role} active={u.active} on_leave={u.on_leave}")
         db.session.commit()
         flash(t("flash_user_upd"), "success")
         return redirect(url_for("admin.users"))
@@ -7466,6 +7675,7 @@ def new_department():
         allowed_types = allowed_types_json,
     )
     db.session.add(dept)
+    write_admin_log("dept_created", "department", target_id=dept.id, target_name=name)
     db.session.commit()
     flash(t("flash_dept_created", name=name), "success")
     return redirect(url_for("admin.departments"))
@@ -7516,6 +7726,7 @@ def edit_department():
     valid_types    = [tt for tt in selected_types if tt in TICKET_TYPES]
     dept.allowed_types = _json.dumps(valid_types) if valid_types else None
 
+    write_admin_log("dept_edited", "department", target_id=dept.id, target_name=dept.name)
     db.session.commit()
     flash(t("flash_dept_updated"), "success")
     return redirect(url_for("admin.departments"))
@@ -7545,6 +7756,7 @@ def delete_department(dept_id):
 
     dept.is_deleted = True
     dept.deleted_at = utc_now()
+    write_admin_log("dept_deleted", "department", target_id=dept.id, target_name=dept.name)
     db.session.commit()
     flash(t("flash_dept_deleted"), "success")
     return redirect(url_for("admin.departments"))
@@ -7572,6 +7784,7 @@ def restore_department(dept_id):
 
     dept.is_deleted = False
     dept.deleted_at = None
+    write_admin_log("dept_restored", "department", target_id=dept.id, target_name=dept.name)
     db.session.commit()
     flash(t("flash_dept_restored", name=dept.name), "success")
     return redirect(url_for("admin.departments"))
@@ -7811,6 +8024,8 @@ def settings():
                 if val <= 0:
                     raise ValueError(f"Value for {key} must be positive")
                 SystemSetting.set(key, val)
+            write_admin_log("settings_changed", "settings",
+                            target_name="SLA hours", new_value=str(request.form.to_dict()))
             db.session.commit()
             flash(t("flash_settings_saved"), "success")
         except Exception as exc:
@@ -7829,6 +8044,65 @@ def settings():
         _SETTINGS_TEMPLATE,
         sla_values=sla_values,
     )
+
+
+# ── Admin Log Viewer ─────────────────────────
+@admin_bp.route("/admin-log")
+@admin_required
+def admin_log():
+    """View paginated admin audit log — admin only."""
+    page = request.args.get("page", 1, type=int)
+    logs = (AdminLog.query
+            .order_by(AdminLog.created_at.desc())
+            .paginate(page=page, per_page=50, error_out=False))
+    html = """{% extends 'base.html' %}
+{% block title %}Admin Audit Log{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0"><i class="bi bi-journal-text text-primary me-2"></i>Admin Audit Log</h4>
+</div>
+<div class="card border-0 shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Time</th>
+          <th>Admin</th>
+          <th>Action</th>
+          <th>Target</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in logs.items %}
+        <tr>
+          <td class="text-muted small text-nowrap">{{ log.created_at | localtime }}</td>
+          <td>{{ log.actor.name if log.actor else '—' }}</td>
+          <td><span class="badge bg-secondary">{{ log.action }}</span></td>
+          <td class="small">{{ log.target_type }}{% if log.target_name %}: {{ log.target_name }}{% endif %}</td>
+          <td class="small text-muted">{% if log.new_value %}{{ log.new_value[:120] }}{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="text-center text-muted py-4">No admin actions recorded yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if logs.pages > 1 %}
+  <div class="card-footer d-flex justify-content-center">
+    <nav><ul class="pagination pagination-sm mb-0">
+      {% for p in range(1, logs.pages + 1) %}
+      <li class="page-item {{ 'active' if p == logs.page else '' }}">
+        <a class="page-link" href="{{ url_for('admin.admin_log', page=p) }}">{{ p }}</a>
+      </li>
+      {% endfor %}
+    </ul></nav>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+"""
+    return render_template_string(html, logs=logs)
 
 
 # ── API (HTMX) ────────────────────────────────
@@ -7984,7 +8258,20 @@ def health_check():
     """
     Lightweight liveness probe used by Railway, Docker, and load-balancers.
     Returns 200 when the app process is alive and the DB is reachable.
-    Returns 503 when the DB check fails so the platform can restart the dyno.
+    Returns 503 ONLY when the DB check fails, so the platform can restart the dyno.
+
+    Scheduler status is reported for observability only and never affects the
+    HTTP status code. Reasons:
+      • Railway calls this endpoint only at deploy time, to decide whether to
+        route traffic to the new release (see Railway healthcheck docs). If a
+        transient scheduler hiccup ever flipped this to 503, a perfectly good
+        deploy would be rejected and the app would stay stuck on the old
+        release — with the DB and the rest of the app fully healthy.
+      • SCHEDULER_ENABLED=false is an intentional, documented setting for any
+        extra Gunicorn worker beyond the first (see scheduler.start() comment
+        above). A worker running with the scheduler off by design is not an
+        unhealthy worker — it must not be reported as 503.
+
     No authentication required — this endpoint must be reachable without a session.
     """
     import time
@@ -8001,15 +8288,30 @@ def health_check():
         app.logger.error(f"[Health] DB check failed: {exc}")
     elapsed_ms = round((time.monotonic() - start) * 1000, 1)
 
+    # ── Scheduler status (informational only — does NOT affect status_code) ───
+    # APScheduler STATE_RUNNING = 1; any other value means it stopped/never started.
+    try:
+        scheduler_running = scheduler.running
+        scheduler_jobs    = len(scheduler.get_jobs())
+    except Exception:
+        scheduler_running = False
+        scheduler_jobs    = 0
+
+    # Overall health = DB only. The scheduler can legitimately be stopped on
+    # secondary workers (SCHEDULER_ENABLED=false) without that being a failure.
+    overall_ok = db_ok
+
     payload = {
-        "status": "ok" if db_ok else "degraded",
-        "db": "ok" if db_ok else "error",
+        "status":    "ok" if overall_ok else "error",
+        "db":        "ok" if db_ok        else "error",
+        "scheduler": "ok" if scheduler_running else "stopped",
+        "scheduler_jobs": scheduler_jobs,
         "elapsed_ms": elapsed_ms,
     }
     if db_error:
         payload["db_error"] = db_error
 
-    status_code = 200 if db_ok else 503
+    status_code = 200 if overall_ok else 503
     return _jsonify(payload), status_code
 
 
@@ -8094,6 +8396,7 @@ def ensure_columns():
         ("users",       "on_leave",            "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 0"),
         ("users",       "is_available",        "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 1"),
         ("users",       "password_changed_at", "TIMESTAMP",        "TEXT",             None),
+        ("users",       "must_change_password", "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 0"),
         ("attachments", "file_data",           "BYTEA",            "BLOB",             None),  # Railway DB storage (legacy)
         ("attachments", "gdrive_file_id",     "VARCHAR(100)",     "TEXT",             None),  # Google Drive file ID
         ("backups",     "email_sent",          "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 0"),
