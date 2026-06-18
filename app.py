@@ -2865,6 +2865,17 @@ TEMPLATES = {
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+  (function () {
+    var alerts = document.querySelectorAll('.alert.alert-dismissible');
+    alerts.forEach(function (el) {
+      setTimeout(function () {
+        var bsAlert = bootstrap.Alert.getOrCreateInstance(el);
+        bsAlert.close();
+      }, 5000);
+    });
+  })();
+</script>
 </body>
 </html>
 """,
@@ -2873,15 +2884,6 @@ TEMPLATES = {
 "templates/login.html": """{% extends 'base.html' %}
 {% block title %}{{ t('login') }}{% endblock %}
 {% block content %}
-{# Flash messages rendered here so they appear on the login page regardless of base.html layout #}
-{% with messages = get_flashed_messages(with_categories=true) %}
-  {% for cat, msg in messages %}
-  <div class="alert alert-{{ cat }} alert-dismissible fade show" role="alert">
-    {{ msg }}
-    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-  </div>
-  {% endfor %}
-{% endwith %}
 <div class="row justify-content-center mt-5">
   <div class="col-md-5 col-lg-4">
     <div class="card shadow-sm border-0">
