@@ -505,6 +505,14 @@ TRANSLATIONS = {
         "hist_sla":          "SLA",
         "hist_breached":     "Breached",
         "hist_ok":           "OK",
+        # Admin audit log page (table headers)
+        "admin_log_title":   "Admin Audit Log",
+        "admin_log_time":    "Time",
+        "admin_log_admin":   "Admin",
+        "admin_log_action":  "Action",
+        "admin_log_target":  "Target",
+        "admin_log_details": "Details",
+        "admin_log_empty":   "No admin actions recorded yet.",
         "recent_activity":   "Recent Activity",
         "action_created":    "Ticket Created",
         "action_status_change": "Status Changed",
@@ -639,6 +647,7 @@ TRANSLATIONS = {
         "err_reset_invalid":     "The password reset link is invalid or has expired (1 hour limit).",
         "err_user_not_found":    "User not found.",
         "flash_pw_updated":      "Password updated successfully. Please log in.",
+        "flash_pw_set_continue": "Password updated successfully. Continuing to your dashboard.",
         "must_change_pw_notice": "Your administrator has set a temporary password. Please set a new password before continuing.",
         "change_password":       "Change Password",
         "flash_welcome":         "Welcome {name}! Account created successfully. Please log in.",
@@ -826,6 +835,14 @@ TRANSLATIONS = {
         "hist_sla":          "SLA",
         "hist_breached":     "خرق",
         "hist_ok":           "سليم",
+        # Admin audit log page (table headers)
+        "admin_log_title":   "سجل تدقيق المسؤول",
+        "admin_log_time":    "الوقت",
+        "admin_log_admin":   "المسؤول",
+        "admin_log_action":  "الإجراء",
+        "admin_log_target":  "الهدف",
+        "admin_log_details": "التفاصيل",
+        "admin_log_empty":   "لا توجد إجراءات إدارية مسجّلة حتى الآن.",
         "recent_activity":   "آخر النشاطات",
         "action_created":    "إنشاء تذكرة",
         "action_status_change": "تغيير الحالة",
@@ -960,6 +977,7 @@ TRANSLATIONS = {
         "err_reset_invalid":     "رابط إعادة التعيين غير صالح أو انتهت صلاحيته (حد أقصى ساعة).",
         "err_user_not_found":    "المستخدم غير موجود.",
         "flash_pw_updated":      "تم تحديث كلمة المرور بنجاح. يرجى تسجيل الدخول.",
+        "flash_pw_set_continue": "تم تحديث كلمة المرور بنجاح. سيتم تحويلك إلى لوحة التحكم.",
         "must_change_pw_notice": "تم تعيين كلمة مرور مؤقتة من قبل المسؤول. يرجى تغيير كلمة المرور قبل المتابعة.",
         "change_password":       "تغيير كلمة المرور",
         "flash_welcome":         "مرحباً {name}! تم إنشاء الحساب بنجاح. يرجى تسجيل الدخول.",
@@ -5598,7 +5616,7 @@ def force_change_password():
             current_user.set_password(pw)
             current_user.must_change_password = False
             db.session.commit()
-            flash(t("flash_pw_updated"), "success")
+            flash(t("flash_pw_set_continue"), "success")
             return redirect(url_for("main.dashboard"))
     html = """{% extends 'base.html' %}
 {% block title %}Change Password{% endblock %}
@@ -8056,21 +8074,21 @@ def admin_log():
             .order_by(AdminLog.created_at.desc())
             .paginate(page=page, per_page=50, error_out=False))
     html = """{% extends 'base.html' %}
-{% block title %}Admin Audit Log{% endblock %}
+{% block title %}{{ t('admin_log_title') }}{% endblock %}
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
-  <h4 class="fw-bold mb-0"><i class="bi bi-journal-text text-primary me-2"></i>Admin Audit Log</h4>
+  <h4 class="fw-bold mb-0"><i class="bi bi-journal-text text-primary me-2"></i>{{ t('admin_log_title') }}</h4>
 </div>
 <div class="card border-0 shadow-sm">
   <div class="table-responsive">
     <table class="table table-sm table-hover align-middle mb-0">
       <thead class="table-light">
         <tr>
-          <th>Time</th>
-          <th>Admin</th>
-          <th>Action</th>
-          <th>Target</th>
-          <th>Details</th>
+          <th>{{ t('admin_log_time') }}</th>
+          <th>{{ t('admin_log_admin') }}</th>
+          <th>{{ t('admin_log_action') }}</th>
+          <th>{{ t('admin_log_target') }}</th>
+          <th>{{ t('admin_log_details') }}</th>
         </tr>
       </thead>
       <tbody>
@@ -8083,7 +8101,7 @@ def admin_log():
           <td class="small text-muted">{% if log.new_value %}{{ log.new_value[:120] }}{% endif %}</td>
         </tr>
         {% else %}
-        <tr><td colspan="5" class="text-center text-muted py-4">No admin actions recorded yet.</td></tr>
+        <tr><td colspan="5" class="text-center text-muted py-4">{{ t('admin_log_empty') }}</td></tr>
         {% endfor %}
       </tbody>
     </table>
