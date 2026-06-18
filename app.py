@@ -8407,28 +8407,29 @@ def ensure_columns():
     it does NOT skip the index on non-PostgreSQL dialects, so declaring it
     in the model crashes db.create_all() on SQLite.
     """
-    # Each entry: (table, column, pg_type, sqlite_type, default_clause_or_None)
-    # pg_type / sqlite_type may differ (e.g. BOOLEAN vs INTEGER for SQLite)
+    # Each entry: (table, column, pg_type, sqlite_type, pg_default, sqlite_default)
+    # pg_default and sqlite_default are kept separate because PostgreSQL BOOLEAN
+    # requires TRUE/FALSE literals while SQLite stores booleans as INTEGER (0/1).
     REQUIRED_COLUMNS = [
-        ("users",       "username",            "VARCHAR(60)",      "TEXT",             None),
-        ("users",       "on_leave",            "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 0"),
-        ("users",       "is_available",        "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 1"),
-        ("users",       "password_changed_at", "TIMESTAMP",        "TEXT",             None),
-        ("users",       "must_change_password", "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 0"),
-        ("attachments", "file_data",           "BYTEA",            "BLOB",             None),  # Railway DB storage (legacy)
-        ("attachments", "gdrive_file_id",     "VARCHAR(100)",     "TEXT",             None),  # Google Drive file ID
-        ("backups",     "email_sent",          "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT 0"),
-        ("departments", "allowed_types",       "TEXT",             "TEXT",             None),  # JSON list of allowed ticket types
+        # table          column                  pg_type             sqlite_type         pg_default       sqlite_default
+        ("users",       "username",            "VARCHAR(60)",      "TEXT",             None,            None),
+        ("users",       "on_leave",            "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT FALSE", "DEFAULT 0"),
+        ("users",       "is_available",        "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT TRUE",  "DEFAULT 1"),
+        ("users",       "password_changed_at", "TIMESTAMP",        "TEXT",             None,            None),
+        ("users",       "must_change_password", "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT FALSE", "DEFAULT 0"),
+        ("attachments", "file_data",           "BYTEA",            "BLOB",             None,            None),   # Railway DB storage (legacy)
+        ("attachments", "gdrive_file_id",     "VARCHAR(100)",     "TEXT",             None,            None),   # Google Drive file ID
+        ("backups",     "email_sent",          "BOOLEAN NOT NULL", "INTEGER NOT NULL", "DEFAULT FALSE", "DEFAULT 0"),
+        ("departments", "allowed_types",       "TEXT",             "TEXT",             None,            None),   # JSON list of allowed ticket types
     ]
     with app.app_context():
         is_postgres = db.engine.dialect.name == "postgresql"
         with db.engine.connect() as conn:
 
             # ── Add missing columns ───────────────────────────────
-            for table, col, pg_type, sqlite_type, default in REQUIRED_COLUMNS:
-                default_clause = f" {default}" if default else ""
-
+            for table, col, pg_type, sqlite_type, pg_default, sqlite_default in REQUIRED_COLUMNS:
                 if is_postgres:
+                    default_clause = f" {pg_default}" if pg_default else ""
                     # PostgreSQL supports IF NOT EXISTS natively
                     sql = (
                         f"ALTER TABLE {table} "
@@ -8440,6 +8441,7 @@ def ensure_columns():
                     except Exception as e:
                         app.logger.warning(f"ensure_columns: could not add {table}.{col} — {e}")
                 else:
+                    default_clause = f" {sqlite_default}" if sqlite_default else ""
                     # SQLite: check if column exists first, then add if absent
                     try:
                         rows = conn.execute(db.text(f"PRAGMA table_info({table})")).fetchall()
