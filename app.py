@@ -3240,7 +3240,7 @@ TEMPLATES = {
             <select name="department_id" id="dept_select" class="form-select" required
                     hx-get="{{ url_for('api.dept_ticket_types') }}"
                     hx-target="#type_select"
-                    hx-trigger="change"
+                    hx-trigger="change, load"
                     hx-include="[name='department_id']">
               <option value="">{{ t('choose_dept') }}</option>
               {% for d in departments %}
