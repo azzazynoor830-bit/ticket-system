@@ -519,6 +519,7 @@ TRANSLATIONS = {
         "action_reassign":   "Reassigned",
         "action_comment_added": "Comment Added",
         "action_attachment_uploaded": "Attachment Uploaded",
+        "action_priority_change": "Priority Changed",
         # Phase 4 — Reports & Search
         "reports":               "Reports",
         "reports_title":         "System Reports",
@@ -858,6 +859,7 @@ TRANSLATIONS = {
         "action_reassign":   "إعادة تعيين",
         "action_comment_added": "إضافة تعليق",
         "action_attachment_uploaded": "رفع مرفق",
+        "action_priority_change": "تغيير الأولوية",
         # Phase 4 — Reports & Search
         "reports":               "التقارير",
         "reports_title":         "تقارير النظام",
@@ -2379,6 +2381,25 @@ def create_backup(source: str = "auto") -> Backup | None:
                     {"key": s.key, "value": s.value}
                     for s in SystemSetting.query.all()
                 ],
+                # Admin audit log — was missing entirely before this fix, which meant
+                # every restore silently dropped the whole admin_logs table AND
+                # (since the old rows still referenced users.id) caused
+                # restore_from_backup()'s "DELETE FROM users" to fail with a
+                # ForeignKeyViolation as soon as a single admin_logs row existed.
+                "admin_logs": [
+                    {
+                        "id":          a.id,
+                        "actor_id":    a.actor_id,
+                        "action":      a.action,
+                        "target_type": a.target_type,
+                        "target_id":   a.target_id,
+                        "target_name": a.target_name,
+                        "old_value":   a.old_value,
+                        "new_value":   a.new_value,
+                        "created_at":  a.created_at.isoformat() if a.created_at else None,
+                    }
+                    for a in AdminLog.query.all()
+                ],
             }
 
             # ── 2. Dump to JSON then compress ───────────────────────
@@ -2589,6 +2610,16 @@ def restore_from_backup(backup: Backup) -> None:
     with db.session.begin_nested():   # savepoint — outer transaction wraps everything
 
         # ── DELETE in child-first order ──────────────────────────────
+        # Fix: departments.manager_id and users.department_id form a circular FK
+        # pair (that's why manager_id uses use_alter=True in the model). Deleting
+        # "users" while a department row still points at it via manager_id raised
+        # a ForeignKeyViolation on PostgreSQL. NULL it out first to break the cycle.
+        db.session.execute(db.text("UPDATE departments SET manager_id = NULL"))
+        # Fix: admin_logs.actor_id references users.id and was never cleared here,
+        # so "DELETE FROM users" below raised a ForeignKeyViolation as soon as any
+        # admin_logs row existed (i.e. almost immediately in real usage) and every
+        # restore silently failed. Must run before DELETE FROM users.
+        db.session.execute(db.text("DELETE FROM admin_logs"))
         db.session.execute(db.text("DELETE FROM notifications"))
         db.session.execute(db.text("DELETE FROM ticket_history"))
         db.session.execute(db.text("DELETE FROM attachments"))
@@ -2652,6 +2683,32 @@ def restore_from_backup(backup: Backup) -> None:
                 db.session.execute(db.text(
                     "UPDATE departments SET manager_id = :mid WHERE id = :id"
                 ), {"mid": d["manager_id"], "id": d["id"]})
+
+        # 3b. Admin audit log — must come after users (actor_id FK).
+        # Fix: this table was previously never backed up or restored at all,
+        # which meant every restore permanently wiped the entire admin audit
+        # trail (user create/edit, department CRUD, settings changes) and, on
+        # top of that, was the root cause of "DELETE FROM users" above failing
+        # with a ForeignKeyViolation whenever admin_logs had any rows.
+        for a in data.get("admin_logs", []):
+            db.session.execute(db.text(
+                "INSERT INTO admin_logs "
+                "(id, actor_id, action, target_type, target_id, target_name, "
+                " old_value, new_value, created_at) "
+                "VALUES "
+                "(:id, :actor_id, :action, :target_type, :target_id, :target_name, "
+                " :old_value, :new_value, :created_at)"
+            ), {
+                "id":          a["id"],
+                "actor_id":    a["actor_id"],
+                "action":      a["action"],
+                "target_type": a["target_type"],
+                "target_id":   a.get("target_id"),
+                "target_name": a.get("target_name"),
+                "old_value":   a.get("old_value"),
+                "new_value":   a.get("new_value"),
+                "created_at":  a.get("created_at"),
+            })
 
         # 4. Tickets
         for t in data.get("tickets", []):
@@ -2797,6 +2854,7 @@ def restore_from_backup(backup: Backup) -> None:
                 ("ticket_history","id"),
                 ("attachments",   "id"),
                 ("notifications", "id"),
+                ("admin_logs",    "id"),
             ]:
                 db.session.execute(db.text(
                     f"SELECT setval(pg_get_serial_sequence('{table}', '{col}'), "
@@ -3624,6 +3682,8 @@ TEMPLATES = {
                   <span class="badge bg-secondary">{{ t('action_comment_added') }}</span>
                 {% elif h.action == 'attachment_uploaded' %}
                   <span class="badge bg-warning text-dark">{{ t('action_attachment_uploaded') }}</span>
+                {% elif h.action == 'priority_change' %}
+                  <span class="badge bg-dark">{{ t('action_priority_change') }}</span>
                 {% else %}
                   <span class="badge bg-light text-dark">{{ h.action }}</span>
                 {% endif %}
@@ -3898,6 +3958,8 @@ TEMPLATES = {
                   <span class="badge bg-secondary">{{ t('action_comment_added') }}</span>
                 {% elif h.action == 'attachment_uploaded' %}
                   <span class="badge bg-warning text-dark">{{ t('action_attachment_uploaded') }}</span>
+                {% elif h.action == 'priority_change' %}
+                  <span class="badge bg-dark">{{ t('action_priority_change') }}</span>
                 {% else %}
                   <span class="badge bg-light text-dark">{{ h.action }}</span>
                 {% endif %}
