@@ -631,6 +631,15 @@ TRANSLATIONS = {
         "waiting_vendor":        "Waiting for Vendor",
         "reopened":              "Reopened",
         "apply":                 "Apply",
+        "nav_operations":        "Operations",
+        "nav_admin":             "Administration",
+        "nav_logs":              "Logs",
+        "deleted_tickets":       "Deleted",
+        "deleted_tickets_title": "Deleted Tickets",
+        "back_to_tickets":       "Back to All Tickets",
+        "restore":               "Restore",
+        "confirm_restore":       "Restore ticket {num}?",
+        "no_deleted_tickets":    "No deleted tickets found.",
         "deleted_at_col":        "Deleted At",
         # ── Flash messages ────────────────────────────────────────────────────
         "err_fields_required":   "All fields are required",
@@ -961,6 +970,15 @@ TRANSLATIONS = {
         "waiting_vendor":        "في انتظار المورد",
         "reopened":              "معاد فتحها",
         "apply":                 "تطبيق",
+        "nav_operations":        "العمليات",
+        "nav_admin":             "الإدارة",
+        "nav_logs":              "السجلات",
+        "deleted_tickets":       "المحذوفة",
+        "deleted_tickets_title": "التذاكر المحذوفة",
+        "back_to_tickets":       "العودة لكل التذاكر",
+        "restore":               "استعادة",
+        "confirm_restore":       "استعادة التذكرة {num}؟",
+        "no_deleted_tickets":    "لا توجد تذاكر محذوفة.",
         "deleted_at_col":        "تاريخ الحذف",
         # ── Flash messages ────────────────────────────────────────────────────
         "err_fields_required":   "جميع الحقول مطلوبة",
@@ -2839,52 +2857,69 @@ TEMPLATES = {
             <i class="bi bi-list-task"></i> {{ t('all_tickets') }}
           </a>
         </li>
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+            <i class="bi bi-gear-wide-connected"></i> {{ t('nav_operations') }}
+          </a>
+          <ul class="dropdown-menu">
+            <li>
+              <a class="dropdown-item" href="{{ url_for('admin.reports') }}">
+                <i class="bi bi-bar-chart-fill"></i> {{ t('reports') }}
+              </a>
+            </li>
+            <li>
+              <a class="dropdown-item" href="{{ url_for('admin.search') }}">
+                <i class="bi bi-search"></i> {{ t('search') }}
+              </a>
+            </li>
+          </ul>
+        </li>
         {% endif %}
         {% if current_user.role == 'admin' %}
-        <li class="nav-item">
-          <a class="nav-link" href="{{ url_for('admin.users') }}">
-            <i class="bi bi-people-fill"></i> {{ t('users') }}
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+            <i class="bi bi-shield-fill-check"></i> {{ t('nav_admin') }}
           </a>
+          <ul class="dropdown-menu">
+            <li>
+              <a class="dropdown-item" href="{{ url_for('admin.users') }}">
+                <i class="bi bi-people-fill"></i> {{ t('users') }}
+              </a>
+            </li>
+            <li>
+              <a class="dropdown-item" href="{{ url_for('admin.departments') }}">
+                <i class="bi bi-diagram-3-fill"></i> {{ t('departments') }}
+              </a>
+            </li>
+            <li>
+              <a class="dropdown-item" href="{{ url_for('admin.backups_list') }}">
+                <i class="bi bi-shield-lock-fill"></i> {{ t('backups') }}
+              </a>
+            </li>
+            <li>
+              <a class="dropdown-item" href="{{ url_for('admin.settings') }}">
+                <i class="bi bi-gear-fill"></i> {{ t('settings') }}
+              </a>
+            </li>
+          </ul>
         </li>
-        <li class="nav-item">
-          <a class="nav-link" href="{{ url_for('admin.departments') }}">
-            <i class="bi bi-diagram-3-fill"></i> {{ t('departments') }}
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+            <i class="bi bi-journal-text"></i> {{ t('nav_logs') }}
           </a>
+          <ul class="dropdown-menu">
+            <li>
+              <a class="dropdown-item text-danger" href="{{ url_for('admin.deleted_tickets') }}">
+                <i class="bi bi-trash3"></i> {{ t('deleted_tickets') }}
+              </a>
+            </li>
+            <li>
+              <a class="dropdown-item" href="{{ url_for('admin.admin_log') }}">
+                <i class="bi bi-journal-text"></i> {{ t('audit_trail') }}
+              </a>
+            </li>
+          </ul>
         </li>
-        <li class="nav-item">
-          <a class="nav-link" href="{{ url_for('admin.backups_list') }}">
-            <i class="bi bi-shield-lock-fill"></i> {{ t('backups') }}
-          </a>
-        </li>
-        {% endif %}
-        {% if current_user.role in ('admin', 'manager') %}
-        <li class="nav-item">
-          <a class="nav-link" href="{{ url_for('admin.reports') }}">
-            <i class="bi bi-bar-chart-fill"></i> {{ t('reports') }}
-          </a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link" href="{{ url_for('admin.search') }}">
-            <i class="bi bi-search"></i> {{ t('search') }}
-          </a>
-        </li>
-        {% if current_user.role == 'admin' %}
-        <li class="nav-item">
-          <a class="nav-link text-danger" href="{{ url_for('admin.deleted_tickets') }}">
-            <i class="bi bi-trash3"></i> Deleted
-          </a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link" href="{{ url_for('admin.settings') }}">
-            <i class="bi bi-gear-fill"></i> {{ t('settings') }}
-          </a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link" href="{{ url_for('admin.admin_log') }}">
-            <i class="bi bi-journal-text"></i> {{ t('audit_trail') }}
-          </a>
-        </li>
-        {% endif %}
         {% endif %}
       </ul>
       <ul class="navbar-nav">
@@ -4722,15 +4757,15 @@ input, textarea, select {
 
 # ── deleted_tickets.html ────────────────────────
 "templates/deleted_tickets.html": """{% extends 'base.html' %}
-{% block title %}Deleted Tickets{% endblock %}
+{% block title %}{{ t('deleted_tickets_title') }}{% endblock %}
 {% block content %}
 <div class="container-fluid py-4">
   <div class="d-flex justify-content-between align-items-center mb-4">
     <h4 class="fw-bold text-danger">
-      <i class="bi bi-trash3"></i> Deleted Tickets
+      <i class="bi bi-trash3"></i> {{ t('deleted_tickets_title') }}
     </h4>
     <a href="{{ url_for('admin.tickets') }}" class="btn btn-outline-secondary btn-sm">
-      <i class="bi bi-arrow-left"></i> Back to All Tickets
+      <i class="bi bi-arrow-left"></i> {{ t('back_to_tickets') }}
     </a>
   </div>
 
@@ -4772,10 +4807,10 @@ input, textarea, select {
           <td>
             <form method="POST"
                   action="{{ url_for('admin.restore_ticket', ticket_id=tk.id) }}"
-                  onsubmit="return confirm('Restore ticket {{ tk.ticket_number }}?')">
+                  onsubmit="return confirm('{{ t('confirm_restore', num=tk.ticket_number) }}')">
               {{ form.hidden_tag() }}
               <button type="submit" class="btn btn-sm btn-success">
-                <i class="bi bi-arrow-counterclockwise"></i> Restore
+                <i class="bi bi-arrow-counterclockwise"></i> {{ t('restore') }}
               </button>
             </form>
           </td>
@@ -4803,7 +4838,7 @@ input, textarea, select {
 
   {% else %}
     <div class="alert alert-info">
-      <i class="bi bi-info-circle"></i> No deleted tickets found.
+      <i class="bi bi-info-circle"></i> {{ t('no_deleted_tickets') }}
     </div>
   {% endif %}
 </div>
@@ -6159,7 +6194,9 @@ def new_ticket():
 @login_required
 def ticket_detail(ticket_id):
     ticket = Ticket.query.filter_by(id=ticket_id, is_deleted=False).first_or_404()
-    # Access: owner, assignee, admin, manager
+    # Access: owner, assignee, admin, manager (manager restricted to own dept)
+    if current_user.role == "manager" and ticket.department_id != current_user.department_id:
+        abort(403)
     if current_user.role == "employee" and \
        ticket.created_by != current_user.id and \
        ticket.assigned_to != current_user.id:
@@ -6197,6 +6234,8 @@ def ticket_detail(ticket_id):
 @limiter.limit("60 per hour")
 def add_comment(ticket_id):
     ticket = Ticket.query.filter_by(id=ticket_id, is_deleted=False).first_or_404()
+    if current_user.role == "manager" and ticket.department_id != current_user.department_id:
+        abort(403)
     if current_user.role == "employee" and \
        ticket.created_by != current_user.id and \
        ticket.assigned_to != current_user.id:
@@ -6301,7 +6340,9 @@ def upload_attachment(ticket_id):
     """Upload a file attachment to an existing ticket."""
     ticket = Ticket.query.filter_by(id=ticket_id, is_deleted=False).first_or_404()
 
-    # Access: owner, assignee, admin, manager
+    # Access: owner, assignee, admin, manager (manager restricted to own dept)
+    if current_user.role == "manager" and ticket.department_id != current_user.department_id:
+        abort(403)
     if current_user.role == "employee" and \
        ticket.created_by != current_user.id and \
        ticket.assigned_to != current_user.id:
@@ -6487,9 +6528,12 @@ def overview():
     ).order_by(Ticket.created_at.asc()).limit(5).all())
 
     # Stats by department
-    dept_rows = (db.session.query(Department.name, func.count(Ticket.id))
+    dept_rows_q = (db.session.query(Department.name, func.count(Ticket.id))
                  .join(Ticket, Ticket.department_id == Department.id)
-                 .filter(Ticket.is_deleted == False)
+                 .filter(Ticket.is_deleted == False))
+    if current_user.role == "manager":
+        dept_rows_q = dept_rows_q.filter(Ticket.department_id == current_user.department_id)
+    dept_rows = (dept_rows_q
                  .group_by(Department.name)
                  .order_by(func.count(Ticket.id).desc())
                  .all())
@@ -6557,9 +6601,12 @@ def tickets():
     ).order_by(Ticket.created_at.desc()).paginate(
         page=request.args.get("page", 1, type=int), per_page=20, error_out=False
     )
-    total    = Ticket.query.filter_by(is_deleted=False).count()
-    open_cnt = Ticket.query.filter_by(is_deleted=False, status="Open").count()
-    breach   = Ticket.query.filter_by(is_deleted=False, sla_breached=True).count()
+    base_stats_q = Ticket.query.filter_by(is_deleted=False)
+    if current_user.role == "manager":
+        base_stats_q = base_stats_q.filter_by(department_id=current_user.department_id)
+    total    = base_stats_q.count()
+    open_cnt = base_stats_q.filter_by(status="Open").count()
+    breach   = base_stats_q.filter_by(sla_breached=True).count()
     stats = [
         (t("total_tickets"), total,    "primary", "ticket-perforated"),
         (t("open"),          open_cnt, "warning",  "folder2-open"),
