@@ -2273,6 +2273,7 @@ def create_backup(source: str = "auto") -> Backup | None:
                         "created_at":           u.created_at.isoformat() if u.created_at else None,
                         "password_changed_at":  u.password_changed_at.isoformat()
                                                 if u.password_changed_at else None,
+                        "must_change_password": u.must_change_password,
                     }
                     for u in User.query.all()
                 ],
@@ -2600,10 +2601,12 @@ def restore_from_backup(backup: Backup) -> None:
             db.session.execute(db.text(
                 "INSERT INTO users "
                 "(id, name, username, email, password_hash, role, department_id, "
-                " active, on_leave, is_available, created_at, password_changed_at) "
+                " active, on_leave, is_available, created_at, password_changed_at, "
+                " must_change_password) "
                 "VALUES "
                 "(:id, :name, :username, :email, :password_hash, :role, :department_id, "
-                " :active, :on_leave, :is_available, :created_at, :password_changed_at)"
+                " :active, :on_leave, :is_available, :created_at, :password_changed_at, "
+                " :must_change_password)"
             ), {
                 "id":                  u["id"],
                 "name":                u["name"],
@@ -2617,6 +2620,12 @@ def restore_from_backup(backup: Backup) -> None:
                 "is_available":        u.get("is_available", True),
                 "created_at":          u.get("created_at"),
                 "password_changed_at": u.get("password_changed_at"),
+                # Fix: missing from both backup-serialisation and restore-insert until now —
+                # caused EVERY restore on a freshly-created DB (must_change_password has
+                # no server-side DEFAULT until ensure_columns() ALTER-adds it on an
+                # already-existing table) to fail with a NOT NULL IntegrityError, silently
+                # swallowed by the route's except-block and rolled back.
+                "must_change_password": u.get("must_change_password", False),
             })
 
         # 3. Update departments.manager_id now that users exist
