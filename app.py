@@ -3725,7 +3725,8 @@ TEMPLATES = {
 <!-- Stats Cards -->
 <div class="row g-3 mb-4">
   <div class="col-6 col-md-3">
-    <div class="card border-0 shadow-sm h-100">
+    <a href="{{ url_for('admin.tickets') }}" class="text-decoration-none text-reset d-block h-100">
+    <div class="card border-0 shadow-sm h-100 dash-stat-card">
       <div class="card-body d-flex align-items-center gap-3">
         <div class="rounded-circle p-3 bg-primary bg-opacity-10">
           <i class="bi bi-ticket-perforated text-primary fs-4"></i>
@@ -3736,9 +3737,11 @@ TEMPLATES = {
         </div>
       </div>
     </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card border-0 shadow-sm h-100">
+    <a href="{{ url_for('admin.tickets') }}?status=Open" class="text-decoration-none text-reset d-block h-100">
+    <div class="card border-0 shadow-sm h-100 dash-stat-card">
       <div class="card-body d-flex align-items-center gap-3">
         <div class="rounded-circle p-3 bg-warning bg-opacity-10">
           <i class="bi bi-folder2-open text-warning fs-4"></i>
@@ -3749,9 +3752,11 @@ TEMPLATES = {
         </div>
       </div>
     </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card border-0 shadow-sm h-100">
+    <a href="{{ url_for('admin.tickets') }}?status=In+Progress" class="text-decoration-none text-reset d-block h-100">
+    <div class="card border-0 shadow-sm h-100 dash-stat-card">
       <div class="card-body d-flex align-items-center gap-3">
         <div class="rounded-circle p-3 bg-info bg-opacity-10">
           <i class="bi bi-arrow-repeat text-info fs-4"></i>
@@ -3762,9 +3767,11 @@ TEMPLATES = {
         </div>
       </div>
     </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card border-0 shadow-sm h-100">
+    <a href="{{ url_for('admin.tickets') }}?sla=breached" class="text-decoration-none text-reset d-block h-100">
+    <div class="card border-0 shadow-sm h-100 dash-stat-card">
       <div class="card-body d-flex align-items-center gap-3">
         <div class="rounded-circle p-3 bg-danger bg-opacity-10">
           <i class="bi bi-exclamation-triangle text-danger fs-4"></i>
@@ -3775,9 +3782,11 @@ TEMPLATES = {
         </div>
       </div>
     </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card border-0 shadow-sm h-100">
+    <a href="{{ url_for('admin.tickets') }}?status=Resolved" class="text-decoration-none text-reset d-block h-100">
+    <div class="card border-0 shadow-sm h-100 dash-stat-card">
       <div class="card-body d-flex align-items-center gap-3">
         <div class="rounded-circle p-3 bg-success bg-opacity-10">
           <i class="bi bi-check-circle text-success fs-4"></i>
@@ -3788,9 +3797,11 @@ TEMPLATES = {
         </div>
       </div>
     </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card border-0 shadow-sm h-100">
+    <a href="{{ url_for('admin.tickets') }}?status=Closed" class="text-decoration-none text-reset d-block h-100">
+    <div class="card border-0 shadow-sm h-100 dash-stat-card">
       <div class="card-body d-flex align-items-center gap-3">
         <div class="rounded-circle p-3 bg-secondary bg-opacity-10">
           <i class="bi bi-x-circle text-secondary fs-4"></i>
@@ -3801,9 +3812,11 @@ TEMPLATES = {
         </div>
       </div>
     </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card border-0 shadow-sm h-100">
+    <a href="{{ url_for('admin.tickets') }}?priority=Critical&amp;open_only=1" class="text-decoration-none text-reset d-block h-100">
+    <div class="card border-0 shadow-sm h-100 dash-stat-card">
       <div class="card-body d-flex align-items-center gap-3">
         <div class="rounded-circle p-3 bg-danger bg-opacity-10">
           <i class="bi bi-fire text-danger fs-4"></i>
@@ -3814,9 +3827,11 @@ TEMPLATES = {
         </div>
       </div>
     </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card border-0 shadow-sm h-100">
+    <a href="{{ url_for('admin.tickets') }}?assignee=unassigned&amp;open_only=1" class="text-decoration-none text-reset d-block h-100">
+    <div class="card border-0 shadow-sm h-100 dash-stat-card">
       <div class="card-body d-flex align-items-center gap-3">
         <div class="rounded-circle p-3 bg-warning bg-opacity-10">
           <i class="bi bi-person-check text-warning fs-4"></i>
@@ -3827,6 +3842,7 @@ TEMPLATES = {
         </div>
       </div>
     </div>
+    </a>
   </div>
 </div>
 
@@ -3879,20 +3895,21 @@ TEMPLATES = {
       <div class="card-header fw-semibold">
         <i class="bi bi-exclamation-triangle-fill text-danger me-1"></i> {{ t('sla_breached_lbl') }}
       </div>
-      <ul class="list-group list-group-flush">
+      <div class="list-group list-group-flush">
         {% for bt in breached_tickets %}
-        <li class="list-group-item d-flex justify-content-between align-items-center py-2">
+        <a href="{{ url_for('employee.ticket_detail', ticket_id=bt.id) }}"
+           class="list-group-item list-group-item-action d-flex justify-content-between align-items-center py-2">
           <div>
             <span class="badge bg-secondary me-1">{{ bt.ticket_number }}</span>
-            <span class="small">{{ bt.title|truncate(30) }}</span>
+            <span class="small text-dark">{{ bt.title|truncate(30) }}</span>
           </div>
           <span class="badge bg-{{ priority_color(bt.priority) }}">{{ bt.priority }}</span>
-        </li>
+        </a>
         {% else %}
-        <li class="list-group-item text-center text-muted py-3">{{ t('no_sla_breach') }}</li>
+        <div class="list-group-item text-center text-muted py-3">{{ t('no_sla_breach') }}</div>
         {% endfor %}
-      </ul>
-      {% if breached_tickets|length == 5 %}
+      </div>
+      {% if breached_tickets %}
       <div class="card-footer text-center">
         <a href="{{ url_for('admin.tickets') }}?sla=breached" class="small text-primary">{{ t('all_tickets_btn') }}</a>
       </div>
@@ -3904,16 +3921,17 @@ TEMPLATES = {
       <div class="card-header fw-semibold">
         <i class="bi bi-diagram-3 text-primary me-1"></i> {{ t('tickets_by_dept') }}
       </div>
-      <ul class="list-group list-group-flush">
-        {% for dept_name, dept_count in dept_stats %}
-        <li class="list-group-item d-flex justify-content-between align-items-center py-2">
-          <span>{{ dept_name }}</span>
+      <div class="list-group list-group-flush">
+        {% for dept_id, dept_name, dept_count in dept_stats %}
+        <a href="{{ url_for('admin.tickets') }}?dept={{ dept_id }}"
+           class="list-group-item list-group-item-action d-flex justify-content-between align-items-center py-2">
+          <span class="text-dark">{{ dept_name }}</span>
           <span class="badge bg-primary rounded-pill">{{ dept_count }}</span>
-        </li>
+        </a>
         {% else %}
-        <li class="list-group-item text-center text-muted py-3">{{ t('no_data') }}</li>
+        <div class="list-group-item text-center text-muted py-3">{{ t('no_data') }}</div>
         {% endfor %}
-      </ul>
+      </div>
     </div>
   </div>
 </div>
@@ -6590,16 +6608,18 @@ def overview():
     ).order_by(Ticket.created_at.asc()).limit(5).all())
 
     # Stats by department
-    dept_rows_q = (db.session.query(Department.name, func.count(Ticket.id))
+    # Department.id is included (not just .name) so the dashboard can link each
+    # row to the filtered tickets list via ?dept=<id> — name alone isn't a valid filter key.
+    dept_rows_q = (db.session.query(Department.id, Department.name, func.count(Ticket.id))
                  .join(Ticket, Ticket.department_id == Department.id)
                  .filter(Ticket.is_deleted == False))
     if current_user.role == "manager":
         dept_rows_q = dept_rows_q.filter(Ticket.department_id == current_user.department_id)
     dept_rows = (dept_rows_q
-                 .group_by(Department.name)
+                 .group_by(Department.id, Department.name)
                  .order_by(func.count(Ticket.id).desc())
                  .all())
-    dept_stats = [(row[0], row[1]) for row in dept_rows]
+    dept_stats = [(row[0], row[1], row[2]) for row in dept_rows]
 
     now = local_now().strftime("%Y-%m-%d %H:%M")
 
@@ -6634,11 +6654,12 @@ def tickets():
     if current_user.role == "manager":
         query = query.filter_by(department_id=current_user.department_id)
 
-    status   = request.args.get("status")
-    priority = request.args.get("priority")
-    dept     = request.args.get("dept")
-    assignee = request.args.get("assignee")
-    sla      = request.args.get("sla")
+    status    = request.args.get("status")
+    priority  = request.args.get("priority")
+    dept      = request.args.get("dept")
+    assignee  = request.args.get("assignee")
+    sla       = request.args.get("sla")
+    open_only = request.args.get("open_only")
     if status:
         query = query.filter_by(status=status)
     if priority:
@@ -6648,13 +6669,23 @@ def tickets():
             query = query.filter_by(department_id=int(dept))
         except (ValueError, TypeError):
             pass
-    if assignee:
+    if assignee == "unassigned":
+        # Dashboard "Unassigned" card links here — matches assigned_to == None,
+        # same condition used to compute stats["unassigned"] in overview().
+        query = query.filter(Ticket.assigned_to == None)
+    elif assignee:
         try:
             query = query.filter_by(assigned_to=int(assignee))
         except (ValueError, TypeError):
             pass
     if sla == "breached":
         query = query.filter_by(sla_breached=True)
+    if open_only == "1":
+        # Dashboard "Critical (open)" / "Unassigned" cards link here with this flag —
+        # must mirror the exact open_statuses tuple used in overview() so the count
+        # the admin clicked on matches the rows the filtered list actually shows.
+        open_statuses = ("Open", "In Progress", "Waiting for Customer", "Waiting for Vendor", "Reopened")
+        query = query.filter(Ticket.status.in_(open_statuses))
 
     tickets_page = query.options(
         joinedload(Ticket.creator),
