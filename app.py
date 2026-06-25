@@ -3178,8 +3178,8 @@ TEMPLATES = {
           <a href="{{ url_for('main.set_lang', lang='ar') }}" class="btn btn-sm btn-outline-light" title="التبديل للعربية">AR</a>
           {% endif %}
         </li>
-        {% if current_user.role in ('admin', 'manager') %}
-        <!-- Availability Toggle — only for agents who can be assigned tickets -->
+        {% if current_user.role in ('admin', 'manager', 'employee') %}
+        <!-- Availability Toggle — visible to all roles; auto_assign uses is_available for manager+employee -->
         <li class="nav-item me-2 d-flex align-items-center">
           <form method="POST" action="{{ url_for('main.toggle_availability') }}" class="m-0">
             {{ csrf_token_input() | safe }}
