@@ -1936,9 +1936,93 @@ def process_mentions(comment_body, ticket, commenter_id):
 
 
 # ─────────────────────────────────────────────
+# RETRY HELPER FOR SCHEDULED DB JOBS
+# ─────────────────────────────────────────────
+# Fix: Neon (or the Railway↔Neon network path) can have a transient outage —
+# e.g. the compute is cold-starting after auto-suspend, or a brief routing
+# blip — that surfaces as OperationalError when psycopg2 tries to OPEN a new
+# connection. This is different from a stale connection already sitting in
+# the pool (which pool_pre_ping/pool_recycle above already handle): here,
+# connection creation itself is failing, so pre-ping never gets a chance to
+# run. Without a retry, a single bad moment fails the whole job — silently
+# for SLA checks (just a missed notification cycle) but seriously for the
+# nightly backup (one missing OperationalError check away from skipping a
+# day of backups). Only OperationalError is retried — never used elsewhere
+# in this file, so it does not change SQLAlchemy import behaviour.
+#
+# Note on the imports below: this decorator runs at module-load time (it
+# wraps check_sla_breaches etc. as soon as Python reaches "def ..."), but
+# the project's existing "from functools import wraps" lives much further
+# down this file — too late to be available here. Re-importing it under a
+# local alias is safe (Python caches modules in sys.modules, so this is a
+# no-op re-reference, not a second real import) and avoids a NameError.
+from functools import wraps as _wraps
+from sqlalchemy.exc import OperationalError as _OperationalError
+import time as _time
+
+
+def retry_on_db_error(retries=3, delay_seconds=2):
+    """
+    Decorator for scheduled jobs only. Retries the wrapped function on
+    sqlalchemy.exc.OperationalError (transient connection failures), with
+    a short delay that doubles each attempt (2s, 4s, ... for retries=3).
+
+    db.session.rollback() runs between attempts: after an OperationalError,
+    the SQLAlchemy session is left in a "pending rollback" state and will
+    raise again on next use until explicitly rolled back.
+
+    On final failure, the original OperationalError is re-raised (not
+    swallowed) so APScheduler's own "Job raised an exception" log entry
+    still appears — this decorator only adds retries, it does not change
+    what gets logged on a real, persistent failure.
+
+    NOTE: do not apply this decorator to create_backup() — that function
+    is also called directly from a manual "Backup now" route, and a user
+    clicking that button should see a fast, real error rather than wait
+    through 3 retries. The scheduled nightly call is wrapped at the
+    scheduler.add_job() call site instead — see below.
+    """
+    def decorator(func):
+        @_wraps(func)
+        def wrapper(*args, **kwargs):
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    return func(*args, **kwargs)
+                except _OperationalError as exc:
+                    # Fix: by this point, the decorated function's own
+                    # "with app.app_context():" has already exited (the
+                    # exception propagated past it on the way out), so
+                    # there is no ambient app context left for rollback()
+                    # to use — calling it bare here raises a SEPARATE
+                    # RuntimeError ("Working outside of application
+                    # context"), masking the original OperationalError
+                    # and skipping the retry entirely. Wrap explicitly.
+                    with app.app_context():
+                        db.session.rollback()
+                    if attempt >= retries:
+                        app.logger.error(
+                            f"[{func.__name__}] failed after {attempt} attempts "
+                            f"(transient DB connection error): {exc}"
+                        )
+                        raise
+                    wait = delay_seconds * (2 ** (attempt - 1))
+                    app.logger.warning(
+                        f"[{func.__name__}] attempt {attempt}/{retries} failed "
+                        f"with a transient DB connection error, retrying in "
+                        f"{wait}s: {exc}"
+                    )
+                    _time.sleep(wait)
+        return wrapper
+    return decorator
+
+
+# ─────────────────────────────────────────────
 # SLA BACKGROUND JOB (APScheduler)
 # ─────────────────────────────────────────────
 
+@retry_on_db_error()
 def check_sla_breaches():
     """
     Runs every 10 minutes.
@@ -2005,6 +2089,7 @@ def check_sla_breaches():
             app.logger.warning(f"SLA check: {breached_count} ticket(s) marked as breached.")
 
 
+@retry_on_db_error()
 def check_waiting_for_customer_reminders():
     """
     Runs every 6 hours.
@@ -2060,27 +2145,119 @@ def archive_old_notifications():
     loading ORM objects to keep the DB round-trip cheap even with thousands
     of rows.
     """
+    # Fix: retry on transient OperationalError (e.g. Neon cold-start /
+    # network blip) before giving up. A decorator was deliberately NOT
+    # used here, because the existing "except Exception" below has no
+    # re-raise — it would swallow OperationalError before any wrapping
+    # decorator ever saw it, silently defeating the retry. Looping over
+    # OperationalError specifically, inside this existing try, is what
+    # actually gets a retry to run.
     days = int(os.environ.get("NOTIFICATION_ARCHIVE_DAYS", "30"))
     cutoff = utc_now() - timedelta(days=days)
-    try:
-        with app.app_context():
-            result = db.session.execute(
-                db.text(
-                    "UPDATE notifications SET is_read = TRUE "
-                    "WHERE is_read = FALSE AND created_at < :cutoff"
-                ),
-                {"cutoff": cutoff},
-            )
-            db.session.commit()
-            count = result.rowcount
-            if count:
-                app.logger.info(
-                    f"[Notifications] Archived {count} unread notification(s) "
-                    f"older than {days} days (cutoff={cutoff.date()})"
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with app.app_context():
+                result = db.session.execute(
+                    db.text(
+                        "UPDATE notifications SET is_read = TRUE "
+                        "WHERE is_read = FALSE AND created_at < :cutoff"
+                    ),
+                    {"cutoff": cutoff},
                 )
-    except Exception as exc:
-        app.logger.error(f"[Notifications] archive_old_notifications failed: {exc}")
-        db.session.rollback()
+                db.session.commit()
+                count = result.rowcount
+                if count:
+                    app.logger.info(
+                        f"[Notifications] Archived {count} unread notification(s) "
+                        f"older than {days} days (cutoff={cutoff.date()})"
+                    )
+            break
+        except _OperationalError as exc:
+            # Fix: rollback() needs a live app context. By this point the
+            # "with app.app_context()" above has already exited (the
+            # exception propagated out of it), so wrap rollback() in its
+            # own context rather than calling it bare.
+            with app.app_context():
+                db.session.rollback()
+            if attempt >= 3:
+                app.logger.error(
+                    f"[Notifications] archive_old_notifications failed after "
+                    f"{attempt} attempts (transient DB connection error): {exc}"
+                )
+                break
+            wait = 2 * (2 ** (attempt - 1))
+            app.logger.warning(
+                f"[Notifications] archive_old_notifications attempt "
+                f"{attempt}/3 failed with a transient DB connection error, "
+                f"retrying in {wait}s: {exc}"
+            )
+            _time.sleep(wait)
+        except Exception as exc:
+            # Fix: same context issue as above — this bare except already
+            # existed before this retry logic was added, but it had the
+            # same latent bug (rollback() called after app_context() had
+            # already exited). Fixing it here too since it's now visibly
+            # adjacent to the corrected version above.
+            app.logger.error(f"[Notifications] archive_old_notifications failed: {exc}")
+            with app.app_context():
+                db.session.rollback()
+            break
+
+
+def _scheduled_daily_backup():
+    """
+    Wrapper used ONLY by the nightly "daily_backup" scheduler job — NOT a
+    replacement for calling create_backup() directly (the manual "Backup
+    now" route at the /backup/run endpoint still calls create_backup()
+    directly and should keep failing fast for the user).
+
+    Why this can't be a simple decorator around create_backup(): that
+    function already has its own "except Exception: ... return None" (see
+    create_backup above) with no re-raise, so a transient OperationalError
+    is swallowed internally before any wrapping decorator would ever see
+    it. Instead, this wrapper first does a cheap, separate "SELECT 1"
+    probe with its own retry loop. If the DB is unreachable, the probe
+    fails fast and retries on its own — without running the full (slow)
+    backup serialisation each time. Once the probe succeeds, it calls the
+    real create_backup(), which keeps its existing error handling as-is.
+
+    LIMITATION (explicit, not silently assumed away): this only retries
+    the connectivity check BEFORE create_backup() starts. If the network
+    blip happens mid-backup — i.e. AFTER the probe succeeds but DURING
+    the serialisation/commit inside create_backup() — create_backup()'s
+    own except-block will still catch it, log it, and return None, and
+    this wrapper will NOT retry that case. Covering that fully would mean
+    retrying on create_backup() returning None, but None is also returned
+    for non-transient failures (e.g. a real bug), so blindly retrying on
+    None would waste time retrying unretryable errors. Given create_backup()
+    already logs every failure with detail, the pre-flight probe here is a
+    meaningful reduction of the failure window, not a complete guarantee.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with app.app_context():
+                db.session.execute(db.text("SELECT 1"))
+                break  # DB reachable — proceed to the real backup below
+        except _OperationalError as exc:
+            with app.app_context():
+                db.session.rollback()
+            if attempt >= 3:
+                app.logger.error(
+                    f"[Backup] daily_backup DB connectivity check failed after "
+                    f"{attempt} attempts — skipping tonight's backup: {exc}"
+                )
+                return
+            wait = 2 * (2 ** (attempt - 1))
+            app.logger.warning(
+                f"[Backup] daily_backup DB connectivity check attempt "
+                f"{attempt}/3 failed, retrying in {wait}s: {exc}"
+            )
+            _time.sleep(wait)
+    create_backup(source="auto")
 
 
 scheduler = BackgroundScheduler(daemon=True)
@@ -2094,7 +2271,7 @@ scheduler.add_job(
     replace_existing=True,
 )
 scheduler.add_job(
-    func=lambda: create_backup(source="auto"),
+    func=_scheduled_daily_backup,
     trigger="cron",
     hour=22, minute=0,
     id="daily_backup",
