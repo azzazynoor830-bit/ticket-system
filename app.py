@@ -6064,7 +6064,11 @@ def toggle_availability():
         else:
             current_user.is_available = not current_user.is_available
             db.session.commit()
-    return redirect(request.referrer or url_for("main.dashboard"))
+    # Security: only redirect back to same-origin URLs (mirrors set_lang guard)
+    referrer = request.referrer
+    if referrer and referrer.startswith(request.host_url):
+        return redirect(referrer)
+    return redirect(url_for("main.dashboard"))
 
 
 @main_bp.route("/set-lang/<lang>")
