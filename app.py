@@ -233,6 +233,20 @@ limiter = Limiter(
     storage_uri=app.config.get("RATELIMIT_STORAGE_URI", "memory://"),
 )
 
+def login_ip_and_user_key():
+    """
+    Rate-limit key combining client IP + the username/email typed into the
+    login form. Prevents one user's failed attempts (or a NAT'd office full
+    of users sharing one public IP) from locking out everyone else on the
+    same network, while still capping attempts against any single account.
+
+    Falls back to IP-only if the form field is missing (e.g. malformed POST),
+    so the bucket never silently becomes "no key" / unlimited.
+    """
+    login_input = (request.form.get("login_input", "") or "").strip().lower()
+    ip = get_remote_address()
+    return f"{ip}:{login_input}" if login_input else ip
+
 # ── Password Reset Token Helper ───────────────────────────────
 def get_reset_serializer():
     return URLSafeTimedSerializer(app.config["SECRET_KEY"])
@@ -5856,7 +5870,8 @@ def run_setup():
 auth_bp = Blueprint("auth", __name__)
 
 @auth_bp.route("/login", methods=["GET", "POST"])
-@limiter.limit("10 per 15 minutes")
+@limiter.limit("10 per 15 minutes", key_func=login_ip_and_user_key, methods=["POST"])  # per-account: stops brute-forcing one user without blocking office-mates behind the same NAT IP
+@limiter.limit("30 per 15 minutes", methods=["POST"])  # per-IP ceiling: still caps a script hammering many usernames from one source
 def login():
     # If database is empty — redirect to first-run setup page
     if User.query.count() == 0:
