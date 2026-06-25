@@ -12,7 +12,7 @@ jobs:
 
     env:
       FLASK_ENV: development
-      DATABASE_URL: sqlite:///:memory:
+      DATABASE_URL: "sqlite:///:memory:"
       SECRET_KEY: test-secret-key-pytest-2024
       SCHEDULER_ENABLED: "false"
       WTF_CSRF_ENABLED: "false"
