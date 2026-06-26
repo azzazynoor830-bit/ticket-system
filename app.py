@@ -2442,7 +2442,7 @@ def create_backup(source: str = "auto") -> Backup | None:
         2. Dump to JSON and measure the byte size.
         3. Save a Backup record to Neon (always).
         4. Attempt to upload to Google Drive (optional — non-fatal if it fails).
-        5. Delete Backup records older than 30 days to cap DB growth.
+        5. Delete Backup records older than 15 days to cap DB growth.
 
     Returns the new Backup instance, or None on error.
     Note: the daily_backup scheduler job calls this via a lambda so that
@@ -2650,7 +2650,7 @@ def create_backup(source: str = "auto") -> Backup | None:
             import threading
             backup_thread = threading.Thread(
                 target=send_backup_email,
-                args=(backup.id, json_bytes, gzip_bytes),
+                args=(backup.id, json_bytes),
                 daemon=True,
             )
             backup_thread.start()
@@ -2663,9 +2663,9 @@ def create_backup(source: str = "auto") -> Backup | None:
         return None
 
 
-def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> None:
+def send_backup_email(backup_id: int, json_bytes: bytes) -> None:
     """
-    Send the backup as a gzip-compressed JSON attachment to BACKUP_MAIL_TO
+    Send the backup as a JSON attachment to BACKUP_MAIL_TO
     via Brevo API (same provider used by send_email / password reset).
     Runs in a background thread -- accepts backup_id (not the ORM object)
     to avoid detached-instance errors across thread boundaries.
@@ -2677,7 +2677,6 @@ def send_backup_email(backup_id: int, json_bytes: bytes, gzip_bytes: bytes) -> N
     can be restored from there.
 
     json_bytes  -- uncompressed JSON (used to strip file_data_b64 before sending)
-    gzip_bytes  -- compressed bytes that become the .json.gz attachment
     """
     # ── DISABLED: change to True to re-enable backup emails ─────────────────
     _BACKUP_EMAIL_ENABLED = False
@@ -2819,6 +2818,7 @@ def restore_from_backup(backup: Backup) -> None:
         db.session.execute(db.text("DELETE FROM users"))
         db.session.execute(db.text("DELETE FROM departments"))
         db.session.execute(db.text("DELETE FROM ticket_counter"))    # reset so counter stays in sync with restored ticket numbers
+        db.session.execute(db.text("DELETE FROM system_settings"))   # full replace — UPSERT alone leaves stale keys not in the backup
 
         # ── INSERT in parent-first order ─────────────────────────────
 
@@ -5565,7 +5565,7 @@ document.getElementById('editDeptModal').addEventListener('show.bs.modal', funct
           {% endfor %}
         {% else %}
           <tr>
-            <td colspan="7" class="text-center text-muted py-5">
+            <td colspan="5" class="text-center text-muted py-5">
               <i class="bi bi-cloud-slash fs-2 d-block mb-2 opacity-25"></i>
               {{ t('backup_no_records') }}
             </td>
@@ -8197,6 +8197,12 @@ def manual_backup():
 
     result = create_backup(source="manual")
     if result:
+        write_admin_log(
+            "backup_created", "backup",
+            target_id=result.id,
+            target_name=f"backup_{result.id} (manual, {result.size_kb}KB)",
+        )
+        db.session.commit()
         flash(t("flash_backup_created"), "success")
     else:
         flash(t("flash_backup_error"), "danger")
@@ -8239,6 +8245,22 @@ def restore_backup(backup_id):
         db.session.rollback()
         app.logger.error(f"[Restore] failed for backup id={backup_id}: {exc}")
         flash(t("flash_restore_error"), "danger")
+        return redirect(url_for("admin.backups_list"))
+
+    # Audit log is best-effort: restore already committed above.
+    # A log failure (e.g. current_user.id absent from restored backup) must
+    # never roll back the restore or show a misleading error flash to the user.
+    try:
+        write_admin_log(
+            "backup_restored", "backup",
+            target_id=backup.id,
+            target_name=f"backup_{backup.id} ({backup.source}, {backup.size_kb}KB)",
+        )
+        db.session.commit()
+    except Exception as _log_exc:
+        db.session.rollback()
+        app.logger.warning(f"[Restore] audit log failed (non-fatal): {_log_exc}")
+
     return redirect(url_for("admin.backups_list"))
 
 
@@ -8270,10 +8292,16 @@ def upload_restore_backup():
         # Auto-detect gzip: magic bytes \x1f\x8b or .gz extension
         if raw[:2] == b'\x1f\x8b' or uploaded.filename.endswith('.gz'):
             raw = gzip.decompress(raw)
-        # Validate: must be parseable JSON with at least one known key
+        # Validate: must be parseable JSON, a dict, and contain at least one
+        # expected top-level key from a real backup snapshot.
         data = _json.loads(raw.decode("utf-8"))
         if not isinstance(data, dict):
             raise ValueError("root is not an object")
+        _KNOWN_KEYS = {"departments", "users", "tickets", "comments",
+                       "ticket_history", "attachments", "notifications",
+                       "system_settings", "admin_logs"}
+        if not (_KNOWN_KEYS & data.keys()):
+            raise ValueError("no recognised backup keys found — not a valid backup file")
         # Build a throw-away Backup-like object so we can reuse restore_from_backup()
         class _FakeBackup:
             pass
@@ -8286,23 +8314,66 @@ def upload_restore_backup():
         db.session.rollback()
         app.logger.warning(f"[Restore] uploaded file rejected: {exc}")
         flash(t("flash_upload_restore_bad_file"), "danger")
+        return redirect(url_for("admin.backups_list"))
     except Exception as exc:
         db.session.rollback()
         app.logger.error(f"[Restore] upload-restore failed: {exc}")
         flash(t("flash_restore_error"), "danger")
+        return redirect(url_for("admin.backups_list"))
+
+    # Audit log is best-effort: restore already committed above.
+    # A log failure (e.g. current_user.id absent from restored backup) must
+    # never roll back the restore or show a misleading error flash to the user.
+    try:
+        write_admin_log(
+            "backup_restored_upload", "backup",
+            target_name=uploaded.filename,
+        )
+        db.session.commit()
+    except Exception as _log_exc:
+        db.session.rollback()
+        app.logger.warning(f"[Restore] audit log failed (non-fatal): {_log_exc}")
+
     return redirect(url_for("admin.backups_list"))
 
 
 @admin_bp.route("/backups/<int:backup_id>/delete", methods=["POST"])
 @admin_required
 def delete_backup(backup_id):
-    """Permanently delete a single backup snapshot."""
+    """Permanently delete a single backup snapshot (DB record + Drive file)."""
     form = EmptyForm()
     if not form.validate_on_submit():
         abort(400)
 
     backup = db.get_or_404(Backup, backup_id)
     try:
+        # Delete from Google Drive first (before removing the DB record so we
+        # still have the gdrive_id if the Drive call raises).
+        if backup.gdrive_id:
+            try:
+                from googleapiclient.discovery import build
+                from google.oauth2.credentials import Credentials
+                _creds = Credentials(
+                    token=None,
+                    refresh_token=os.environ.get("GDRIVE_REFRESH_TOKEN"),
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=os.environ.get("GDRIVE_CLIENT_ID"),
+                    client_secret=os.environ.get("GDRIVE_CLIENT_SECRET"),
+                    scopes=["https://www.googleapis.com/auth/drive"],
+                )
+                build("drive", "v3", credentials=_creds).files().delete(
+                    fileId=backup.gdrive_id
+                ).execute()
+                app.logger.info(f"[Backup] Deleted Drive file {backup.gdrive_id} for backup id={backup.id}")
+            except Exception as _drive_exc:
+                # Non-fatal — log and continue with DB deletion.
+                app.logger.warning(f"[Backup] Could not delete Drive file {backup.gdrive_id}: {_drive_exc}")
+
+        write_admin_log(
+            "backup_deleted", "backup",
+            target_id=backup.id,
+            target_name=f"backup_{backup.id} ({backup.source}, {backup.size_kb}KB)",
+        )
         db.session.delete(backup)
         db.session.commit()
         flash(t("flash_backup_deleted"), "success")
