@@ -8419,7 +8419,7 @@ _SETTINGS_TEMPLATE = """
           <div class="col-sm-5">
             <div class="input-group">
               <input type="number" class="form-control" name="{{ key }}"
-                     min="0.5" step="0.5"
+                     min="0.5" max="8760" step="0.5"
                      value="{{ sla_values[key] }}" required>
               <span class="input-group-text text-muted">h</span>
             </div>
@@ -8455,8 +8455,10 @@ def settings():
             for key in sla_keys:
                 raw = request.form.get(key, "").strip()
                 val = float(raw)
-                if val <= 0:
-                    raise ValueError(f"Value for {key} must be positive")
+                if val < 0.5:
+                    raise ValueError(f"Value for {key} must be at least 0.5 hours")
+                if val > 8760:
+                    raise ValueError(f"Value for {key} must not exceed 8760 hours")
                 SystemSetting.set(key, val)
             write_admin_log("settings_changed", "settings",
                             target_name="SLA hours", new_value=str(request.form.to_dict()))
