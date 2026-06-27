@@ -668,9 +668,9 @@ TRANSLATIONS = {
         "err_pw_upper":          "Password must contain at least one uppercase letter",
         "err_pw_digit":          "Password must contain at least one number",
         "err_pw_special":        "Password must contain at least one special character (!@#$%^&*...)",
-        "flash_reset_sent":      "Password reset link has been sent to your email.",
-        "flash_reset_fallback":  "If that email exists in our system, a reset link has been sent.",
-        "flash_reset_no_smtp":   "Email service is not configured. Please contact the administrator to reset your password.",
+        "flash_reset_sent":      "If that email is registered in our system, a reset link has been sent. Please check your inbox.",
+        "flash_reset_fallback":  "If that email is registered in our system, a reset link has been sent. Please check your inbox.",
+        "flash_reset_no_smtp":   "If that email is registered in our system, a reset link has been sent. Please check your inbox.",
         "err_reset_invalid":     "The password reset link is invalid or has expired (1 hour limit).",
         "err_user_not_found":    "User not found.",
         "flash_pw_updated":      "Password updated successfully. Please log in.",
@@ -1011,9 +1011,9 @@ TRANSLATIONS = {
         "err_pw_upper":          "يجب أن تحتوي كلمة المرور على حرف كبير واحد على الأقل",
         "err_pw_digit":          "يجب أن تحتوي كلمة المرور على رقم واحد على الأقل",
         "err_pw_special":        "يجب أن تحتوي كلمة المرور على رمز خاص واحد على الأقل (!@#$%^&*...)",
-        "flash_reset_sent":      "تم إرسال رابط إعادة التعيين إلى بريدك الإلكتروني.",
-        "flash_reset_fallback":  "إذا كان البريد موجوداً في النظام، تم إرسال رابط إعادة التعيين.",
-        "flash_reset_no_smtp":   "خدمة البريد الإلكتروني غير مُعدَّة. يرجى التواصل مع المسؤول لإعادة تعيين كلمة المرور.",
+        "flash_reset_sent":      "إذا كان هذا البريد الإلكتروني مسجلاً في النظام، سيصلك رابط إعادة التعيين. تحقق من بريدك الوارد.",
+        "flash_reset_fallback":  "إذا كان هذا البريد الإلكتروني مسجلاً في النظام، سيصلك رابط إعادة التعيين. تحقق من بريدك الوارد.",
+        "flash_reset_no_smtp":   "إذا كان هذا البريد الإلكتروني مسجلاً في النظام، سيصلك رابط إعادة التعيين. تحقق من بريدك الوارد.",
         "err_reset_invalid":     "رابط إعادة التعيين غير صالح أو انتهت صلاحيته (حد أقصى ساعة).",
         "err_user_not_found":    "المستخدم غير موجود.",
         "flash_pw_updated":      "تم تحديث كلمة المرور بنجاح. يرجى تسجيل الدخول.",
@@ -6018,17 +6018,16 @@ def forgot_password():
                 body_text=body_text,
                 body_html=body_html,
             )
-            if sent:
-                flash(t("flash_reset_sent"), "info")
-            else:
+            if not sent:
                 # SMTP not configured — log the reset URL server-side for admin use,
                 # but never expose the token in the UI (security risk).
                 app.logger.warning(
                     f"[PasswordReset] SMTP not configured — reset URL for {user.email}: {reset_url}"
                 )
-                flash(t("flash_reset_no_smtp"), "warning")
-        else:
-            flash(t("flash_reset_fallback"), "info")
+        # Always show the same neutral message regardless of:
+        # 1. Whether the email exists in the database (prevents user enumeration)
+        # 2. Whether SMTP is configured or not (prevents info leakage)
+        flash(t("flash_reset_sent"), "info")
         return redirect(url_for("auth.login"))
     return render_template_string(TEMPLATES["templates/forgot_password.html"], form=EmptyForm())
 
