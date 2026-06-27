@@ -658,6 +658,9 @@ TRANSLATIONS = {
         "deleted_at_col":        "Deleted At",
         # ── Flash messages ────────────────────────────────────────────────────
         "err_fields_required":   "All fields are required",
+        "err_name_required":     "Name is required",
+        "err_email_required":    "Email is required",
+        "err_password_required": "Password is required",
         "err_email_taken":       "Email is already in use",
         "err_username_taken":    "Username is already taken",
         "err_pw_no_match":       "Passwords do not match",
@@ -998,6 +1001,9 @@ TRANSLATIONS = {
         "deleted_at_col":        "تاريخ الحذف",
         # ── Flash messages ────────────────────────────────────────────────────
         "err_fields_required":   "جميع الحقول مطلوبة",
+        "err_name_required":     "الاسم مطلوب",
+        "err_email_required":    "البريد الإلكتروني مطلوب",
+        "err_password_required": "كلمة المرور مطلوبة",
         "err_email_taken":       "البريد الإلكتروني مستخدم بالفعل",
         "err_username_taken":    "اسم المستخدم مستخدم بالفعل",
         "err_pw_no_match":       "كلمتا المرور غير متطابقتين",
@@ -1944,6 +1950,7 @@ def process_mentions(comment_body, ticket, commenter_id):
                 user.id,
                 ticket.id,
                 f"You were mentioned in [{ticket.ticket_number}] by {current_user.name}",
+                event="mention",
             )
             mentioned_ids.append(user.id)
     return mentioned_ids
@@ -6899,7 +6906,7 @@ def tickets():
     stats = [
         (t("total_tickets"), total,    "primary", "ticket-perforated"),
         (t("open"),          open_cnt, "warning",  "folder2-open"),
-        ("SLA Breached",     breach,   "danger",   "exclamation-triangle"),
+        (t("breached"),      breach,   "danger",   "exclamation-triangle"),
     ]
     departments = Department.query.filter_by(is_deleted=False).all()
     all_agents  = User.query.filter_by(active=True).filter(
@@ -7277,21 +7284,40 @@ def reports():
     ).all()
 
     # ── 6. Tickets created per day — last 30 days (for trend chart) ──
+    # Ticket.created_at is stored as naive UTC. Grouping by func.date(created_at)
+    # directly would bucket by the UTC calendar day, which is wrong for any
+    # APP_TIMEZONE ahead of UTC (e.g. Africa/Cairo, UTC+2/+3): a ticket created
+    # at 01:00 local time is still 22:00/23:00 UTC the *previous* day, so it
+    # would silently land in yesterday's column instead of today's.
+    # Fix: shift created_at by the current local UTC offset before truncating
+    # to a date, so the grouping matches the calendar day the user actually saw.
     from datetime import date, timedelta as _td
     today_local = local_now().date()
     thirty_days_ago = today_local - _td(days=29)
     # Convert to UTC-naive for DB comparison
     from_utc = local_to_utc(datetime.combine(thirty_days_ago, datetime.min.time()))
+    # Current local UTC offset (e.g. +03:00 for Africa/Cairo) — used to shift
+    # created_at into local time before extracting the date. A fixed offset is
+    # fine here: we only need calendar-day accuracy for a rolling 30-day window,
+    # not historical DST correctness for older rows.
+    _tz_offset = local_now() - utc_now()
+    if is_postgres:
+        _local_day = func.date(Ticket.created_at + _tz_offset)
+    else:
+        # SQLite: timedelta addition on a DateTime column isn't interpreted
+        # correctly, so shift using its own datetime() modifier syntax instead.
+        _offset_hours = round(_tz_offset.total_seconds() / 3600, 4)
+        _local_day = func.date(func.datetime(Ticket.created_at, f"{_offset_hours:+} hours"))
     trend_q = (
         db.session.query(
-            func.date(Ticket.created_at).label("day"),
+            _local_day.label("day"),
             func.count(Ticket.id).label("cnt"),
         )
         .filter(Ticket.is_deleted == False, Ticket.created_at >= from_utc)
     )
     if dept_filter:
         trend_q = trend_q.filter(Ticket.department_id == dept_filter)
-    trend_rows = trend_q.group_by(func.date(Ticket.created_at)).order_by(func.date(Ticket.created_at)).all()
+    trend_rows = trend_q.group_by(_local_day).order_by(_local_day).all()
     # Build full 30-day series (fill missing days with 0)
     trend_map = {str(r.day): r.cnt for r in trend_rows}
     trend_labels = [(thirty_days_ago + _td(days=i)).strftime("%m/%d") for i in range(30)]
@@ -7712,11 +7738,11 @@ def new_user():
         # ── Server-side validation (do not rely on browser alone) ──
         errors = []
         if not name:
-            errors.append("Name is required")
+            errors.append(t("err_name_required"))
         if not email:
-            errors.append("Email is required")
+            errors.append(t("err_email_required"))
         if not password:
-            errors.append("Password is required")
+            errors.append(t("err_password_required"))
         else:
             errors.extend(validate_password(password))
             if password != password2:
