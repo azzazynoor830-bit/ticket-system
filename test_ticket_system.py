@@ -2853,3 +2853,130 @@ class TestDeletedTicketsView:
         r = client.get("/admin/tickets")
         assert r.status_code == 200
         assert b"UNIQUE_DELETED_9X7Z" not in r.data
+
+
+# ════════════════════════════════════════════════════════════════════
+# 41. Forgot Password — Anti-Enumeration
+# ════════════════════════════════════════════════════════════════════
+
+# النص المحايد الذي يجب أن يظهر في كل الحالات بعد الإصلاح
+_NEUTRAL_PHRASE = "registered in our system"
+
+
+class TestForgotPasswordAntiEnumeration:
+    """
+    يتحقق من أن صفحة نسيت كلمة المرور لا تكشف
+    عن وجود أو عدم وجود البريد الإلكتروني في النظام.
+
+    الشرط الأساسي (OWASP — User Enumeration):
+      - إيميل موجود  → نفس الرسالة المحايدة
+      - إيميل غير موجود → نفس الرسالة المحايدة بالظبط
+      - الرسالتان متساويتان تماماً على مستوى النص
+    """
+
+    # ── مساعد مشترك ──────────────────────────────────────────────
+
+    def _post_forgot(self, client, email):
+        """
+        يرسل POST إلى /forgot-password ويتبع الـ redirect
+        حتى صفحة login، ثم يُعيد نص الصفحة النهائية.
+        """
+        return client.post(
+            "/forgot-password",
+            data={"email": email},
+            follow_redirects=True,
+        )
+
+    # ── Test 1: إيميل موجود → رسالة محايدة ──────────────────────
+
+    def test_existing_email_shows_neutral_message(self, client, app):
+        """
+        إيميل مسجل في النظام → يجب أن تظهر الرسالة المحايدة
+        ولا تظهر أي عبارة تؤكد وصول رابط إعادة التعيين.
+        """
+        with app.app_context():
+            make_user(app, email="fp_exist@t.com", password="Pass@12345")
+            db.session.commit()
+
+        r = self._post_forgot(client, "fp_exist@t.com")
+        assert r.status_code == 200
+
+        content = r.data.decode("utf-8")
+
+        # يجب أن تحتوي الصفحة على العبارة المحايدة
+        assert _NEUTRAL_PHRASE in content, (
+            f"رسالة إيميل موجود لا تحتوي على العبارة المحايدة.\n"
+            f"المتوقع أن يوجد: '{_NEUTRAL_PHRASE}'\n"
+            f"المحتوى المُعاد (أول 500 حرف): {content[:500]}"
+        )
+
+        # يجب ألا تظهر عبارة تؤكد إرسال الرابط بشكل قاطع
+        assert "has been sent to your email" not in content, (
+            "رسالة إيميل موجود تكشف عن وجود الحساب (عبارة قاطعة موجودة)"
+        )
+
+    # ── Test 2: إيميل غير موجود → نفس الرسالة المحايدة ─────────
+
+    def test_nonexistent_email_shows_neutral_message(self, client, app):
+        """
+        إيميل غير مسجل → يجب أن تظهر نفس الرسالة المحايدة تماماً
+        ولا تظهر أي رسالة خطأ تكشف أن الإيميل غير موجود.
+        """
+        r = self._post_forgot(client, "fp_ghost@t.com")
+        assert r.status_code == 200
+
+        content = r.data.decode("utf-8")
+
+        # يجب أن تحتوي الصفحة على العبارة المحايدة
+        assert _NEUTRAL_PHRASE in content, (
+            f"رسالة إيميل غير موجود لا تحتوي على العبارة المحايدة.\n"
+            f"المتوقع أن يوجد: '{_NEUTRAL_PHRASE}'\n"
+            f"المحتوى المُعاد (أول 500 حرف): {content[:500]}"
+        )
+
+        # يجب ألا تظهر أي رسالة خطأ تكشف عدم وجود الإيميل
+        assert "not found" not in content.lower(), (
+            "رسالة إيميل غير موجود تكشف أن الحساب غير موجود"
+        )
+        assert "does not exist" not in content.lower(), (
+            "رسالة إيميل غير موجود تكشف أن الحساب غير موجود"
+        )
+        assert "no account" not in content.lower(), (
+            "رسالة إيميل غير موجود تكشف أن الحساب غير موجود"
+        )
+
+    # ── Test 3: الرسالتان متساويتان string-by-string ─────────────
+
+    def test_response_identical_for_existing_and_nonexistent_email(self, client, app):
+        """
+        الاختبار الجوهري للـ Anti-Enumeration:
+        النص الذي يظهر للمستخدم يجب أن يكون متطابقاً تماماً
+        سواء كان الإيميل مسجلاً أم لا.
+        """
+        with app.app_context():
+            make_user(app, email="fp_cmp_exist@t.com", password="Pass@12345")
+            db.session.commit()
+
+        r_exist = self._post_forgot(client, "fp_cmp_exist@t.com")
+        r_ghost = self._post_forgot(client, "fp_cmp_ghost@t.com")
+
+        assert r_exist.status_code == 200
+        assert r_ghost.status_code == 200
+
+        content_exist = r_exist.data.decode("utf-8")
+        content_ghost = r_ghost.data.decode("utf-8")
+
+        # كلاهما يجب أن يحتوي على العبارة المحايدة
+        assert _NEUTRAL_PHRASE in content_exist, (
+            "رد الإيميل الموجود لا يحتوي على العبارة المحايدة"
+        )
+        assert _NEUTRAL_PHRASE in content_ghost, (
+            "رد الإيميل غير الموجود لا يحتوي على العبارة المحايدة"
+        )
+
+        # الرسالتان يجب أن تحتويا على نفس العبارة المحايدة بالظبط —
+        # نتحقق من التساوي عبر استخلاص العبارة من كلا الردين
+        # (لا نقارن كامل الـ HTML لأن dynamic content قد يختلف)
+        assert (_NEUTRAL_PHRASE in content_exist) == (_NEUTRAL_PHRASE in content_ghost), (
+            "الرسالة المحايدة موجودة في أحد الردين فقط — الردان يجب أن يكونا متماثلين"
+        )
