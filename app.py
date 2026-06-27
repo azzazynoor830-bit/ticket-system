@@ -6662,7 +6662,9 @@ def download_attachment(attachment_id):
     """
     Secure file download — authenticated users only.
     Employee can only download files belonging to their own tickets.
-    Admin/Manager can download any attachment.
+    Admin can download any attachment. Manager is restricted to their
+    own department's tickets — matches the access rule used by
+    ticket_detail / add_comment / upload_attachment / reopen_ticket.
     """
     att = db.session.get(Attachment, attachment_id)
     if not att:
@@ -6672,6 +6674,9 @@ def download_attachment(attachment_id):
     if not ticket or ticket.is_deleted:
         abort(404)
 
+    # Access control — manager restricted to their own department's tickets
+    if current_user.role == "manager" and ticket.department_id != current_user.department_id:
+        abort(403)
     # Access control — employee can download if they created OR are assigned to the ticket
     if (current_user.role == "employee"
             and ticket.created_by != current_user.id
