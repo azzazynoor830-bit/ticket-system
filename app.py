@@ -695,6 +695,7 @@ TRANSLATIONS = {
         "err_password_required": "Password is required",
         "err_email_taken":       "Email is already in use",
         "err_username_taken":    "Username is already taken",
+        "err_last_admin_lockout": "Cannot remove admin role or deactivate this account — at least one active admin must remain in the system.",
         "err_pw_no_match":       "Passwords do not match",
         "err_pw_min_len":        "Password must be at least 10 characters",
         "err_pw_upper":          "Password must contain at least one uppercase letter",
@@ -717,6 +718,7 @@ TRANSLATIONS = {
         "err_attach_closed":     "Cannot add attachments to a closed ticket",
         "err_file_not_found":    "File not found",
         "err_invalid_request":   "Invalid request. Please try again.",
+        "err_invalid_manager":   "Selected manager is not a valid active admin or manager.",
         "err_invalid_status":    "Invalid status value.",
         "err_invalid_assignee":  "Invalid assignee.",
         "err_assignee_inactive": "Selected assignee is not valid, inactive, or not an agent.",
@@ -1038,6 +1040,7 @@ TRANSLATIONS = {
         "err_password_required": "كلمة المرور مطلوبة",
         "err_email_taken":       "البريد الإلكتروني مستخدم بالفعل",
         "err_username_taken":    "اسم المستخدم مستخدم بالفعل",
+        "err_last_admin_lockout": "لا يمكن إزالة صلاحية الأدمن أو تعطيل هذا الحساب — يجب أن يظل أدمن واحد نشط على الأقل في النظام.",
         "err_pw_no_match":       "كلمتا المرور غير متطابقتين",
         "err_pw_min_len":        "يجب أن تكون كلمة المرور 10 أحرف على الأقل",
         "err_pw_upper":          "يجب أن تحتوي كلمة المرور على حرف كبير واحد على الأقل",
@@ -1060,6 +1063,7 @@ TRANSLATIONS = {
         "err_attach_closed":     "لا يمكن إضافة مرفقات لتذكرة مغلقة",
         "err_file_not_found":    "الملف غير موجود",
         "err_invalid_request":   "طلب غير صالح. يرجى المحاولة مرة أخرى.",
+        "err_invalid_manager":   "المدير المختار ليس أدمن أو مانجر نشط وصالح.",
         "err_invalid_status":    "قيمة الحالة غير صالحة.",
         "err_invalid_assignee":  "المُعيَّن غير صالح.",
         "err_assignee_inactive": "المُعيَّن المختار غير صالح أو غير نشط أو ليس وكيلاً.",
@@ -7894,8 +7898,11 @@ def edit_user(user_id):
     u = db.get_or_404(User, user_id)
     form = EmptyForm()
     if request.method == "POST" and form.validate_on_submit():
-        new_email    = request.form.get("email", "").strip().lower()
-        new_username = request.form.get("username", "").strip() or None
+        new_email      = request.form.get("email", "").strip().lower()
+        new_username   = request.form.get("username", "").strip() or None
+        requested_role = request.form.get("role", u.role)
+        new_role       = requested_role if requested_role in ("employee", "manager", "admin") else u.role
+        new_active     = request.form.get("active") == "1"
         errors = []
         # Email uniqueness check (skip if unchanged)
         if new_email and new_email != u.email:
@@ -7908,6 +7915,15 @@ def edit_user(user_id):
                 errors.append(uname_err)
             elif User.query.filter(db.func.lower(User.username) == new_username.lower()).first():
                 errors.append(t("err_username_taken"))
+        # Last-admin protection: block any edit that would leave the system with
+        # zero active admins. Covers both self-lockout (an admin demoting/deactivating
+        # their own account) and accidentally demoting/deactivating the sole other admin.
+        if u.role == "admin" and u.active and not (new_role == "admin" and new_active):
+            other_active_admins = User.query.filter(
+                User.role == "admin", User.active == True, User.id != u.id
+            ).count()
+            if other_active_admins == 0:
+                errors.append(t("err_last_admin_lockout"))
         if errors:
             for err in errors:
                 flash(err, "danger")
@@ -7915,10 +7931,8 @@ def edit_user(user_id):
         u.name          = request.form.get("name", u.name).strip()
         u.email         = new_email or u.email
         u.username      = new_username
-        new_role = request.form.get("role", u.role)
-        if new_role in ("employee", "manager", "admin"):
-            u.role = new_role
-        u.active        = request.form.get("active") == "1"
+        u.role          = new_role
+        u.active        = new_active
         u.on_leave      = request.form.get("on_leave") == "1"
         u.department_id = request.form.get("department_id") or None
         if request.form.get("password"):
@@ -8006,6 +8020,27 @@ def edit_user(user_id):
 # DEPARTMENT MANAGEMENT (Admin only)
 # ─────────────────────────────────────────────
 
+def _validate_manager_id(manager_id_raw):
+    """
+    Parse and validate a manager_id submitted from the department form.
+
+    Returns (manager_id_int_or_None, error_message_or_None).
+    A manager_id is only valid if it refers to an existing, active user
+    whose role is 'admin' or 'manager' — this must be checked server-side
+    because the <select> dropdown can be bypassed by a crafted request.
+    """
+    if not manager_id_raw:
+        return None, None
+    try:
+        manager_id_int = int(manager_id_raw)
+    except (ValueError, TypeError):
+        return None, t("err_invalid_manager")
+    candidate = db.session.get(User, manager_id_int)
+    if not candidate or not candidate.active or candidate.role not in ("admin", "manager"):
+        return None, t("err_invalid_manager")
+    return manager_id_int, None
+
+
 @admin_bp.route("/departments")
 @admin_required
 def departments():
@@ -8073,10 +8108,15 @@ def new_department():
         abort(400)
 
     name       = request.form.get("name", "").strip()
-    manager_id = request.form.get("manager_id") or None
+    manager_id_raw = request.form.get("manager_id") or None
 
     if not name:
         flash(t("err_dept_name_required"), "danger")
+        return redirect(url_for("admin.departments"))
+
+    manager_id, manager_error = _validate_manager_id(manager_id_raw)
+    if manager_error:
+        flash(manager_error, "danger")
         return redirect(url_for("admin.departments"))
 
     # Uniqueness check (case-insensitive, ignore soft-deleted)
@@ -8096,7 +8136,7 @@ def new_department():
 
     dept = Department(
         name          = name,
-        manager_id    = int(manager_id) if manager_id else None,
+        manager_id    = manager_id,
         allowed_types = allowed_types_json,
     )
     db.session.add(dept)
@@ -8116,7 +8156,7 @@ def edit_department():
 
     dept_id    = request.form.get("dept_id")
     name       = request.form.get("name", "").strip()
-    manager_id = request.form.get("manager_id") or None
+    manager_id_raw = request.form.get("manager_id") or None
 
     if not dept_id or not name:
         flash(t("err_invalid_request"), "danger")
@@ -8132,6 +8172,11 @@ def edit_department():
     if not dept:
         abort(404)
 
+    manager_id, manager_error = _validate_manager_id(manager_id_raw)
+    if manager_error:
+        flash(manager_error, "danger")
+        return redirect(url_for("admin.departments"))
+
     # Uniqueness: skip if name unchanged
     if name.lower() != dept.name.lower():
         existing = Department.query.filter(
@@ -8144,7 +8189,7 @@ def edit_department():
             return redirect(url_for("admin.departments"))
 
     dept.name       = name
-    dept.manager_id = int(manager_id) if manager_id else None
+    dept.manager_id = manager_id
 
     import json as _json
     selected_types = request.form.getlist("allowed_types")
