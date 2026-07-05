@@ -97,7 +97,19 @@ class BaseConfig:
     # pool_recycle=300 forces the pool to replace connections older than 5 minutes,
     # preventing server-side timeouts from Neon's idle connection killer before
     # pool_pre_ping has a chance to detect and recycle them.
-    SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True, "pool_recycle": 300}
+    # Fix: default SQLAlchemy pool (pool_size=5, max_overflow=10) allows up to 15
+    # simultaneous connections, far more than this deployment ever needs.
+    # Procfile runs --workers 1 --threads 4 with one in-process APScheduler,
+    # so worst case is 4 request threads + 1 scheduler job = 5 concurrent
+    # connections. pool_size=5 covers that exactly; max_overflow=2 gives a
+    # small safety margin for brief overlap. This lowers idle connection/RAM
+    # overhead without reducing real concurrency headroom.
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        "pool_size": 5,
+        "max_overflow": 2,
+    }
 
     # ── Flask-Mail ───────────────────────────────────────────────────────────
     # Set these env vars in production.  When MAIL_SERVER is absent, email
@@ -214,6 +226,19 @@ else:
     _config = DevelopmentConfig()
 
 app.config.from_object(_config)
+
+# ── Response compression (gzip HTML/JSON to cut egress bandwidth) ────────────
+# Fix: wrapped in try/except so a missing flask-compress dependency (e.g. not
+# yet deployed to requirements.txt) degrades to "no compression" instead of
+# crashing the entire app with ModuleNotFoundError on startup.
+try:
+    from flask_compress import Compress
+    Compress(app)
+except ImportError:
+    app.logger.warning(
+        "flask-compress not installed — responses will not be gzip-compressed. "
+        "Add 'flask-compress' to requirements.txt to enable."
+    )
 
 # ── Dev safety warning ────────────────────────
 if _env != "production":
@@ -1186,7 +1211,7 @@ try:
         handler = RotatingFileHandler(
             os.path.join(log_dir, "app.log"),
             maxBytes=10 * 1024 * 1024,
-            backupCount=5,
+            backupCount=2,  # reduced from 5 — /tmp is ephemeral (wiped on redeploy), so less retention needed; saves RAM
         )
         handler.setLevel(logging.WARNING)
         app.logger.addHandler(handler)
