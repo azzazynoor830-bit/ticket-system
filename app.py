@@ -97,19 +97,7 @@ class BaseConfig:
     # pool_recycle=300 forces the pool to replace connections older than 5 minutes,
     # preventing server-side timeouts from Neon's idle connection killer before
     # pool_pre_ping has a chance to detect and recycle them.
-    # Fix: default SQLAlchemy pool (pool_size=5, max_overflow=10) allows up to 15
-    # simultaneous connections, far more than this deployment ever needs.
-    # Procfile runs --workers 1 --threads 4 with one in-process APScheduler,
-    # so worst case is 4 request threads + 1 scheduler job = 5 concurrent
-    # connections. pool_size=5 covers that exactly; max_overflow=2 gives a
-    # small safety margin for brief overlap. This lowers idle connection/RAM
-    # overhead without reducing real concurrency headroom.
-    SQLALCHEMY_ENGINE_OPTIONS = {
-        "pool_pre_ping": True,
-        "pool_recycle": 300,
-        "pool_size": 5,
-        "max_overflow": 2,
-    }
+    SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True, "pool_recycle": 300}
 
     # ── Flask-Mail ───────────────────────────────────────────────────────────
     # Set these env vars in production.  When MAIL_SERVER is absent, email
@@ -161,6 +149,25 @@ class ProductionConfig(BaseConfig):
     """Production server (Linux + Gunicorn + Nginx)."""
     DEBUG                  = False
     SESSION_COOKIE_SECURE  = True    # requires HTTPS
+
+    # Fix: default SQLAlchemy pool (pool_size=5, max_overflow=10) allows up to 15
+    # simultaneous connections, far more than this deployment ever needs.
+    # Procfile runs --workers 1 --threads 4 with one in-process APScheduler,
+    # so worst case is 4 request threads + 1 scheduler job = 5 concurrent
+    # connections. pool_size=5 covers that exactly; max_overflow=2 gives a
+    # small safety margin for brief overlap. This lowers idle connection/RAM
+    # overhead without reducing real concurrency headroom.
+    # Safe here specifically: ProductionConfig.SQLALCHEMY_DATABASE_URI (below)
+    # always resolves to a postgresql:// URL (raises RuntimeError otherwise),
+    # so this always uses QueuePool, which accepts pool_size/max_overflow.
+    # DevelopmentConfig/tests may use SQLite (StaticPool), which does NOT
+    # accept these arguments — so they must stay out of BaseConfig.
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        "pool_size": 5,
+        "max_overflow": 2,
+    }
 
     @property
     def SECRET_KEY(self):            # noqa: N802
