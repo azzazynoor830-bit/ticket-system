@@ -487,6 +487,7 @@ TRANSLATIONS = {
         "flash_comment_ok":  "Comment added",
         "flash_user_ok":     "User {name} created",
         "flash_user_upd":    "User updated",
+        "flash_dept_manager_cleared": "Note: this user was removed as manager of {depts} because they are no longer an active admin/manager.",
         # errors
         "err_403_title":     "403 — Forbidden",
         "err_403_msg":       "You don't have permission to access this page.",
@@ -835,6 +836,7 @@ TRANSLATIONS = {
         "flash_comment_ok":  "تم إضافة التعليق",
         "flash_user_ok":     "تم إنشاء المستخدم {name}",
         "flash_user_upd":    "تم تحديث المستخدم",
+        "flash_dept_manager_cleared": "ملاحظة: تمت إزالة هذا المستخدم كمسؤول عن قسم {depts} لأنه لم يعد أدمن/مدير نشط.",
         "err_403_title":     "403 — غير مسموح",
         "err_403_msg":       "ليس لديك صلاحية للوصول إلى هذه الصفحة.",
         "err_404_title":     "404 — الصفحة غير موجودة",
@@ -7942,10 +7944,30 @@ def edit_user(user_id):
                     flash(err, "danger")
                 return redirect(request.url)
             u.set_password(request.form["password"])
+            # Force change on next login — mirrors new_user behavior. Without this,
+            # an admin-set password would never need to be changed by the user,
+            # unlike a freshly-created account.
+            u.must_change_password = True
+        # If this user no longer qualifies as a department manager (deactivated or
+        # demoted below admin/manager), clear any department.manager_id pointing to
+        # them. Otherwise a department could keep referencing a disabled/demoted
+        # user as its manager indefinitely (see _validate_manager_id, which only
+        # checks this at department-edit time, not here).
+        cleared_dept_names = []
+        if not (u.active and u.role in ("admin", "manager")):
+            stale_depts = Department.query.filter_by(manager_id=u.id).all()
+            for d in stale_depts:
+                write_admin_log("dept_manager_cleared", "department", target_id=d.id,
+                                target_name=d.name, old_value=f"manager_id={u.id}",
+                                new_value="manager_id=None")
+                d.manager_id = None
+                cleared_dept_names.append(d.name)
         write_admin_log("user_edited", "user", target_id=u.id, target_name=u.email,
                         new_value=f"role={u.role} active={u.active} on_leave={u.on_leave}")
         db.session.commit()
         flash(t("flash_user_upd"), "success")
+        if cleared_dept_names:
+            flash(t("flash_dept_manager_cleared", depts=", ".join(cleared_dept_names)), "warning")
         return redirect(url_for("admin.users"))
     departments = Department.query.filter_by(is_deleted=False).all()
     depts_opts  = "".join(
@@ -8004,7 +8026,9 @@ def edit_user(user_id):
           <option value="0" {'selected' if not u.on_leave else ''}>{{{{ t('not_on_leave') }}}}</option>
           <option value="1" {'selected' if u.on_leave else ''}>{{{{ t('on_leave') }}}}</option>
         </select>
+        {{% if u.on_leave %}}
         <div class="form-text text-muted">{{{{ t('on_leave_note') }}}}</div>
+        {{% endif %}}
       </div>
       <div class="d-flex gap-2">
         <button type="submit" class="btn btn-primary">{{{{ t('save_changes') }}}}</button>
