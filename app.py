@@ -528,6 +528,7 @@ TRANSLATIONS = {
         "download":          "Download",
         "file_too_large":    "File too large (max 10 MB)",
         "file_type_not_allowed": "File type not allowed (PDF, JPG, PNG, DOCX only)",
+        "max_attachments_reached": "Maximum number of attachments reached for this ticket (10 max)",
         "upload_ok":         "File uploaded successfully",
         "upload_error":      "Upload failed — please try again",
         # Reopen
@@ -874,6 +875,7 @@ TRANSLATIONS = {
         "download":          "تحميل",
         "file_too_large":    "الملف كبير جداً (الحد الأقصى 10 ميجا)",
         "file_type_not_allowed": "نوع الملف غير مسموح (PDF، JPG، PNG، DOCX فقط)",
+        "max_attachments_reached": "تم الوصول للحد الأقصى لعدد المرفقات في هذه التذكرة (10 كحد أقصى)",
         "upload_ok":         "تم رفع الملف بنجاح",
         "upload_error":      "فشل الرفع — يرجى المحاولة مرة أخرى",
         # Reopen
@@ -2189,6 +2191,50 @@ def check_waiting_for_customer_reminders():
             app.logger.info(f"Waiting-for-customer reminders sent: {reminded}")
 
 
+@retry_on_db_error()
+def check_database_size():
+    """
+    Runs daily. Tracks actual Neon (Postgres) database size and emails all
+    active admins once it crosses WARNING_THRESHOLD_PCT of NEON_FREE_LIMIT_MB,
+    so the free-tier limit is caught by monitoring instead of by an outage.
+
+    Postgres-only: pg_database_size() has no SQLite equivalent, so this is a
+    silent no-op on the dev DB (same dialect guard used elsewhere in this file).
+
+    NEON_FREE_LIMIT_MB / WARNING_THRESHOLD_PCT are read from environment
+    variables (with sane defaults) so the thresholds can be tuned per
+    deployment without a code change, matching NOTIFICATION_ARCHIVE_DAYS above.
+    """
+    with app.app_context():
+        if db.engine.dialect.name != "postgresql":
+            return
+
+        neon_free_limit_mb = float(os.environ.get("NEON_FREE_LIMIT_MB", "500"))
+        warning_threshold_pct = float(os.environ.get("DB_SIZE_WARNING_PCT", "80"))
+
+        size_bytes = db.session.execute(
+            db.text("SELECT pg_database_size(current_database())")
+        ).scalar()
+        size_mb = size_bytes / (1024 * 1024)
+        pct_used = (size_mb / neon_free_limit_mb) * 100
+
+        app.logger.info(f"[DB Size] {size_mb:.1f}MB / {neon_free_limit_mb:.0f}MB ({pct_used:.1f}%)")
+
+        if pct_used < warning_threshold_pct:
+            return
+
+        subject = f"[Ticket System] Database at {pct_used:.0f}% of free-tier limit"
+        body = (
+            f"Current database size: {size_mb:.1f} MB out of {neon_free_limit_mb:.0f} MB "
+            f"({pct_used:.1f}% used).\n\n"
+            "Consider reviewing backup retention, orphaned attachments, or upgrading the plan."
+        )
+        admins = User.query.filter_by(role="admin", active=True).all()
+        for admin_user in admins:
+            if admin_user.email:
+                send_email(admin_user.email, subject, body)
+
+
 def archive_old_notifications():
     """
     Scheduler job — runs nightly at 02:00.
@@ -2334,6 +2380,13 @@ scheduler.add_job(
     trigger="cron",
     hour=22, minute=0,
     id="daily_backup",
+    replace_existing=True,
+)
+scheduler.add_job(
+    func=check_database_size,
+    trigger="cron",
+    hour=3, minute=0,
+    id="db_size_check",
     replace_existing=True,
 )
 # In debug mode, Werkzeug reloads twice (parent + child process).
@@ -6592,6 +6645,7 @@ ALLOWED_MIMETYPES  = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 MAX_FILE_BYTES = 10 * 1024 * 1024   # 10 MB
+MAX_ATTACHMENTS_PER_TICKET = 10     # simple abuse guard — caps attachments per ticket regardless of storage backend (Drive or Neon fallback)
 
 
 def _get_upload_folder():
@@ -6606,6 +6660,12 @@ def _save_attachment(file_storage, ticket):
     Returns (Attachment | None, error_message | None).
     Does NOT call db.session.commit() — caller handles the transaction.
     """
+    # Abuse guard — checked first (cheapest check, no file I/O) so a ticket that
+    # already hit the cap rejects new uploads before reading/sniffing the file.
+    existing_count = Attachment.query.filter_by(ticket_id=ticket.id).count()
+    if existing_count >= MAX_ATTACHMENTS_PER_TICKET:
+        return None, t("max_attachments_reached")
+
     original_name = file_storage.filename or ""
     ext = original_name.rsplit(".", 1)[-1].lower() if "." in original_name else ""
 
