@@ -661,6 +661,30 @@ TRANSLATIONS = {
         "flash_upload_restore_ok":      "Database restored from uploaded file successfully",
         "flash_upload_restore_bad_file":"Invalid or unreadable backup file",
         "flash_upload_restore_no_file": "No file selected",
+        # ── Ticket Archiving ──────────────────────────────────────────
+        "archived_tickets":            "Archive",
+        "archived_tickets_title":      "Archived Tickets",
+        "archive_id":                  "ID",
+        "archive_ticket_number":       "Ticket #",
+        "archive_title":               "Title",
+        "archive_status":              "Status",
+        "archive_closed_at":           "Closed On",
+        "archive_archived_at":         "Archived On",
+        "archive_comments":            "Comments",
+        "archive_actions":             "Actions",
+        "archive_view":                "View",
+        "archive_download":            "Download",
+        "archive_restore":             "Restore",
+        "archive_restored_badge":      "Restored",
+        "archive_confirm_restore":     "Restore this ticket back into the active ticket list? A new ticket will be created with the same content.",
+        "archive_no_records":          "No archived tickets — tickets are archived automatically when needed.",
+        "flash_archive_view_error":    "Could not load the archived ticket — the file may be unavailable",
+        "flash_archive_restored":      "Ticket [{num}] restored successfully",
+        "flash_archive_restore_error": "Restore failed — check server logs",
+        "flash_archive_already_restored": "This ticket was already restored earlier",
+        "archive_view_title":          "Archived Ticket",
+        "archive_back_to_list":        "Back to Archive",
+        "archive_original_id":         "Original ID",
         # Ticket types (displayed in UI)
         "ttype_it_support":      "IT Support",
         "ttype_hr_request":      "HR Request",
@@ -1008,6 +1032,30 @@ TRANSLATIONS = {
         "flash_upload_restore_ok":      "تمت استعادة قاعدة البيانات من الملف المرفوع بنجاح",
         "flash_upload_restore_bad_file":"الملف غير صالح أو تعذّر قراءته",
         "flash_upload_restore_no_file": "لم يتم اختيار أي ملف",
+        # ── أرشفة التذاكر ──────────────────────────────────────────
+        "archived_tickets":            "الأرشيف",
+        "archived_tickets_title":      "التذاكر المؤرشفة",
+        "archive_id":                  "رقم",
+        "archive_ticket_number":       "رقم التذكرة",
+        "archive_title":               "العنوان",
+        "archive_status":              "الحالة",
+        "archive_closed_at":           "تاريخ الإغلاق",
+        "archive_archived_at":         "تاريخ الأرشفة",
+        "archive_comments":            "التعليقات",
+        "archive_actions":             "الإجراءات",
+        "archive_view":                "عرض",
+        "archive_download":            "تحميل",
+        "archive_restore":             "استرجاع",
+        "archive_restored_badge":      "تم الاسترجاع",
+        "archive_confirm_restore":     "استرجاع هذه التذكرة إلى قائمة التذاكر النشطة؟ سيتم إنشاء تذكرة جديدة بنفس المحتوى.",
+        "archive_no_records":          "لا توجد تذاكر مؤرشفة — يتم أرشفة التذاكر تلقائياً عند الحاجة.",
+        "flash_archive_view_error":    "تعذّر تحميل التذكرة المؤرشفة — قد يكون الملف غير متاح",
+        "flash_archive_restored":      "تم استرجاع التذكرة [{num}] بنجاح",
+        "flash_archive_restore_error": "فشلت عملية الاسترجاع — راجع سجل الخادم",
+        "flash_archive_already_restored": "تم استرجاع هذه التذكرة من قبل",
+        "archive_view_title":          "تذكرة مؤرشفة",
+        "archive_back_to_list":        "العودة إلى الأرشيف",
+        "archive_original_id":         "الرقم الأصلي",
         # أنواع التذاكر (تُعرض في الواجهة)
         "ttype_it_support":      "طلب دعم تقني",
         "ttype_hr_request":      "طلب موارد بشرية",
@@ -1664,6 +1712,48 @@ class TicketCounter(db.Model):
 
 
 # ─────────────────────────────────────────────
+# ARCHIVED TICKET INDEX MODEL
+# ─────────────────────────────────────────────
+
+class ArchivedTicket(db.Model):
+    """
+    One index row per ticket archived by archive_old_closed_tickets().
+
+    This table is intentionally lightweight — it holds only enough metadata
+    to list, locate, and re-fetch the archive. The full ticket payload
+    (ticket fields + comments + history, as JSON) lives in the Google Drive
+    file referenced by gdrive_file_id, not in this table, so archiving a
+    ticket actually frees space in Neon instead of just relocating the
+    same bytes to a different table.
+
+    original_ticket_id is NOT a ForeignKey to tickets.id on purpose: by the
+    time this row exists, archive_old_closed_tickets() has already deleted
+    the live Ticket/Comment/TicketHistory rows for it. A ForeignKey here
+    would either block that deletion (if RESTRICT) or turn NULL the moment
+    the ticket is gone (if SET NULL), losing the very reference this index
+    exists to preserve. restore_archived_ticket() re-creates a new Ticket
+    row when restoring rather than re-using the old ticket_id, since the
+    ticket_counter/id sequence has moved on since the original was deleted.
+    """
+    __tablename__ = "archived_tickets"
+
+    id                    = db.Column(db.Integer, primary_key=True)
+    original_ticket_id    = db.Column(db.Integer, nullable=False)
+    ticket_number         = db.Column(db.String(20), nullable=True, index=True)
+    title                 = db.Column(db.String(200), nullable=False)
+    status                = db.Column(db.String(30), nullable=False)
+    closed_at             = db.Column(db.DateTime, nullable=True)  # last updated_at before archiving
+    comment_count         = db.Column(db.Integer, default=0, nullable=False)
+    gdrive_file_id        = db.Column(db.String(100), nullable=True)  # None if Drive not configured
+    archived_at           = db.Column(db.DateTime, default=lambda: utc_now(),
+                                      nullable=False, index=True)
+    restored_at           = db.Column(db.DateTime, nullable=True)  # set when restored back to live tables
+
+    def __repr__(self):
+        return f"<ArchivedTicket {self.ticket_number} archived={self.archived_at}>"
+
+
+# ─────────────────────────────────────────────
 # SYSTEM SETTINGS MODEL
 # ─────────────────────────────────────────────
 
@@ -2194,14 +2284,30 @@ def check_waiting_for_customer_reminders():
 @retry_on_db_error()
 def check_database_size():
     """
-    Runs daily. Tracks actual Neon (Postgres) database size and emails all
-    active admins once it crosses WARNING_THRESHOLD_PCT of NEON_FREE_LIMIT_MB,
-    so the free-tier limit is caught by monitoring instead of by an outage.
+    Runs daily. Tracks actual Neon (Postgres) database size and, once usage
+    crosses ARCHIVE_TRIGGER_PCT of NEON_FREE_LIMIT_MB, automatically
+    archives the oldest closed/resolved tickets (see
+    archive_old_closed_tickets()) to bring usage back down — fully
+    unattended, with no admin action required.
+
+    Deliberately does NOT send a raw "database at X% of limit" technical
+    warning to the customer's admins: that kind of message names an
+    internal infrastructure detail (Neon, free-tier limits) the customer
+    was never meant to have to think about, and reads as alarming without
+    telling them anything actionable. Instead:
+      - If archiving runs and succeeds, a short reassuring "routine
+        maintenance completed" email is sent — after the fact, once the
+        system has already resolved it, not as a warning beforehand.
+      - If usage is high AND archiving could not bring it down (e.g. Drive
+        not configured, or every candidate ticket failed to upload), that
+        is an operational problem outside the customer's control — it
+        goes to DEV_ALERT_EMAIL (this codebase's maintainer) only, never
+        to the customer.
 
     Postgres-only: pg_database_size() has no SQLite equivalent, so this is a
     silent no-op on the dev DB (same dialect guard used elsewhere in this file).
 
-    NEON_FREE_LIMIT_MB / WARNING_THRESHOLD_PCT are read from environment
+    NEON_FREE_LIMIT_MB / ARCHIVE_TRIGGER_PCT are read from environment
     variables (with sane defaults) so the thresholds can be tuned per
     deployment without a code change, matching NOTIFICATION_ARCHIVE_DAYS above.
     """
@@ -2210,7 +2316,7 @@ def check_database_size():
             return
 
         neon_free_limit_mb = float(os.environ.get("NEON_FREE_LIMIT_MB", "500"))
-        warning_threshold_pct = float(os.environ.get("DB_SIZE_WARNING_PCT", "80"))
+        archive_trigger_pct = float(os.environ.get("ARCHIVE_TRIGGER_PCT", "85"))
 
         size_bytes = db.session.execute(
             db.text("SELECT pg_database_size(current_database())")
@@ -2220,19 +2326,77 @@ def check_database_size():
 
         app.logger.info(f"[DB Size] {size_mb:.1f}MB / {neon_free_limit_mb:.0f}MB ({pct_used:.1f}%)")
 
-        if pct_used < warning_threshold_pct:
+        if pct_used < archive_trigger_pct:
             return
 
-        subject = f"[Ticket System] Database at {pct_used:.0f}% of free-tier limit"
-        body = (
-            f"Current database size: {size_mb:.1f} MB out of {neon_free_limit_mb:.0f} MB "
-            f"({pct_used:.1f}% used).\n\n"
-            "Consider reviewing backup retention, orphaned attachments, or upgrading the plan."
+        try:
+            archived_count = archive_old_closed_tickets()
+        except Exception as exc:
+            app.logger.error(f"[DB Size] archive_old_closed_tickets failed: {exc}")
+            archived_count = 0
+
+        if archived_count > 0:
+            # Re-measure so the customer-facing email (if any details are
+            # ever added) and the maintainer log reflect the post-archive
+            # state, not the stale pre-archive percentage.
+            new_size_bytes = db.session.execute(
+                db.text("SELECT pg_database_size(current_database())")
+            ).scalar()
+            new_pct_used = (new_size_bytes / (1024 * 1024) / neon_free_limit_mb) * 100
+            app.logger.info(
+                f"[DB Size] Auto-archived {archived_count} ticket(s); "
+                f"{pct_used:.1f}% → {new_pct_used:.1f}%"
+            )
+            _send_customer_maintenance_email(archived_count)
+        else:
+            # Archiving did not reduce usage — either nothing was eligible,
+            # or every candidate failed (e.g. Drive misconfigured). Either
+            # way this needs a developer, not the customer, to look at it.
+            _send_dev_alert_email(pct_used, size_mb, neon_free_limit_mb)
+
+
+def _send_customer_maintenance_email(archived_count: int) -> None:
+    """
+    Notify active admins that routine automatic maintenance ran — phrased
+    as a positive, non-technical confirmation (no mention of Neon,
+    percentages, or free-tier limits). Sent only after archiving has
+    already completed successfully.
+    """
+    subject_en = "Routine system maintenance completed"
+    body_en = (
+        f"Routine maintenance ran automatically to keep the system running smoothly.\n\n"
+        f"{archived_count} old, already-closed ticket(s) were archived and are still "
+        f"fully accessible from the Archive page at any time.\n\n"
+        f"No action is needed on your part."
+    )
+    admins = User.query.filter_by(role="admin", active=True).all()
+    for admin_user in admins:
+        if admin_user.email:
+            send_email(admin_user.email, subject_en, body_en)
+
+
+def _send_dev_alert_email(pct_used: float, size_mb: float, neon_free_limit_mb: float) -> None:
+    """
+    Technical alert for the developer/maintainer only — never sent to the
+    customer's admins. Configured via DEV_ALERT_EMAIL; silently skipped
+    (with a log line) if that variable is not set.
+    """
+    dev_email = os.environ.get("DEV_ALERT_EMAIL")
+    if not dev_email:
+        app.logger.warning(
+            "[DB Size] High usage and auto-archiving did not help, but "
+            "DEV_ALERT_EMAIL is not configured — no alert sent."
         )
-        admins = User.query.filter_by(role="admin", active=True).all()
-        for admin_user in admins:
-            if admin_user.email:
-                send_email(admin_user.email, subject, body)
+        return
+    subject = f"[Ticket System] DB at {pct_used:.0f}% — auto-archive did not reduce usage"
+    body = (
+        f"Database size: {size_mb:.1f} MB / {neon_free_limit_mb:.0f} MB ({pct_used:.1f}%).\n\n"
+        "Automatic archiving ran but did not reduce usage — check whether "
+        "GDRIVE_ARCHIVE_FOLDER_ID / GDRIVE_FOLDER_ID and the other GDRIVE_* "
+        "credentials are configured and valid, and check the server logs "
+        "for [Archive] entries."
+    )
+    send_email(dev_email, subject, body)
 
 
 def archive_old_notifications():
@@ -3155,6 +3319,287 @@ def restore_from_backup(backup: Backup) -> None:
 
 
 # ─────────────────────────────────────────────
+# TICKET ARCHIVING (Neon space reduction)
+# ─────────────────────────────────────────────
+
+def archive_old_closed_tickets(max_tickets: int = 500) -> int:
+    """
+    Archive the oldest closed/resolved tickets to Google Drive to free
+    space in Neon, following the same pattern as create_backup():
+    serialise → upload → record an index row → delete the live rows.
+
+    Candidate tickets: status in ('Resolved', 'Closed'), not already
+    deleted, and last updated more than ARCHIVE_MIN_AGE_DAYS ago (default
+    180 = 6 months — a deliberately shorter floor than the 1-year figure
+    floated during planning, so archiving still has room to act if it is
+    ever triggered close to the Neon free-tier ceiling).
+
+    Oldest-updated-first ordering, capped at max_tickets per run, so a
+    single invocation cannot try to serialise an unbounded number of
+    tickets in one transaction.
+
+    Each ticket is archived independently: if the Drive upload fails for
+    one ticket, that ticket is skipped (left untouched in the live
+    tables) and the loop continues with the next one — a transient Drive
+    problem on one ticket must not block archiving the rest, and must
+    never delete a ticket whose data was not confirmed to reach Drive.
+
+    Returns the number of tickets actually archived (rows deleted from
+    the live tables). Safe to call with nothing to archive — returns 0.
+    """
+    import json as _json_arch
+
+    min_age_days = int(os.environ.get("ARCHIVE_MIN_AGE_DAYS", "180"))
+    cutoff = utc_now() - timedelta(days=min_age_days)
+
+    with app.app_context():
+        candidates = (
+            Ticket.query
+            .filter(
+                Ticket.is_deleted.is_(False),
+                Ticket.status.in_(["Resolved", "Closed"]),
+                Ticket.updated_at < cutoff,
+            )
+            .order_by(Ticket.updated_at.asc())
+            .limit(max_tickets)
+            .all()
+        )
+
+        archived_count = 0
+        for ticket in candidates:
+            try:
+                comments = Comment.query.filter_by(ticket_id=ticket.id).all()
+                history  = TicketHistory.query.filter_by(ticket_id=ticket.id).all()
+
+                payload = {
+                    "version": "1.0",
+                    "archived_at": utc_now().isoformat(),
+                    "ticket": {
+                        "id":            ticket.id,
+                        "ticket_number": ticket.ticket_number,
+                        "title":         ticket.title,
+                        "description":   ticket.description,
+                        "type":          ticket.type,
+                        "priority":      ticket.priority,
+                        "status":        ticket.status,
+                        "created_by":    ticket.created_by,
+                        "assigned_to":   ticket.assigned_to,
+                        "department_id": ticket.department_id,
+                        "created_at":    ticket.created_at.isoformat() if ticket.created_at else None,
+                        "updated_at":    ticket.updated_at.isoformat() if ticket.updated_at else None,
+                        "sla_breached":  ticket.sla_breached,
+                    },
+                    "comments": [
+                        {
+                            "id":         c.id,
+                            "user_id":    c.user_id,
+                            "body":       c.body,
+                            "created_at": c.created_at.isoformat() if c.created_at else None,
+                        }
+                        for c in comments
+                    ],
+                    "history": [
+                        {
+                            "id":           h.id,
+                            "changed_by":   h.changed_by,
+                            "action":       h.action,
+                            "old_value":    h.old_value,
+                            "new_value":    h.new_value,
+                            "sla_breached": h.sla_breached,
+                            "created_at":   h.created_at.isoformat() if h.created_at else None,
+                        }
+                        for h in history
+                    ],
+                }
+
+                json_bytes = _json_arch.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+                gzip_bytes = gzip.compress(json_bytes, compresslevel=9)
+
+                # Reuse the same OAuth2 upload path as backups. Uses
+                # GDRIVE_ARCHIVE_FOLDER_ID if set, else falls back to the
+                # main backup folder — same fallback pattern already used
+                # by upload_attachment_to_gdrive() for its own folder var.
+                gdrive_id = _upload_archive_to_gdrive(gzip_bytes, ticket.ticket_number, ticket.id)
+                if not gdrive_id:
+                    # Drive upload failed or not configured — do NOT delete
+                    # the live ticket data with nowhere safe to recover it from.
+                    app.logger.warning(
+                        f"[Archive] Skipped ticket id={ticket.id} "
+                        f"({ticket.ticket_number}) — Drive upload did not succeed"
+                    )
+                    continue
+
+                index_row = ArchivedTicket(
+                    original_ticket_id=ticket.id,
+                    ticket_number=ticket.ticket_number,
+                    title=ticket.title,
+                    status=ticket.status,
+                    closed_at=ticket.updated_at,
+                    comment_count=len(comments),
+                    gdrive_file_id=gdrive_id,
+                )
+                db.session.add(index_row)
+                db.session.flush()
+
+                # Delete live rows — history first (no cascade on that
+                # relationship by design, see Ticket.history comment),
+                # then comments/attachments cascade via the Ticket delete.
+                TicketHistory.query.filter_by(ticket_id=ticket.id).delete()
+                db.session.delete(ticket)
+                db.session.commit()
+
+                archived_count += 1
+                app.logger.info(
+                    f"[Archive] Archived ticket id={index_row.original_ticket_id} "
+                    f"({index_row.ticket_number}) → Drive file {gdrive_id}"
+                )
+            except Exception as exc:
+                db.session.rollback()
+                app.logger.error(
+                    f"[Archive] Failed to archive ticket id={ticket.id}: {exc}"
+                )
+                continue
+
+        return archived_count
+
+
+def _upload_archive_to_gdrive(gzip_bytes: bytes, ticket_number: Optional[str], ticket_id: int) -> Optional[str]:
+    """
+    Upload one archived-ticket JSON payload to Google Drive.
+    Mirrors upload_to_gdrive()'s credential handling exactly; kept as a
+    separate function (rather than reusing upload_to_gdrive directly)
+    because the filename and folder-selection fallback differ.
+    Returns the Drive file ID, or None if Drive is not configured or the
+    upload fails.
+    """
+    folder_id     = os.environ.get("GDRIVE_ARCHIVE_FOLDER_ID") or os.environ.get("GDRIVE_FOLDER_ID")
+    client_id     = os.environ.get("GDRIVE_CLIENT_ID")
+    client_secret = os.environ.get("GDRIVE_CLIENT_SECRET")
+    refresh_token = os.environ.get("GDRIVE_REFRESH_TOKEN")
+    if not all([folder_id, client_id, client_secret, refresh_token]):
+        return None
+    try:
+        from googleapiclient.discovery import build
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.http import MediaInMemoryUpload
+
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        service  = build("drive", "v3", credentials=creds)
+        safe_number = ticket_number or f"id{ticket_id}"
+        filename = f"archived_ticket_{safe_number}.json.gz"
+        media    = MediaInMemoryUpload(gzip_bytes, mimetype="application/gzip")
+        file_meta = {"name": filename, "parents": [folder_id]}
+        result = service.files().create(
+            body=file_meta, media_body=media, fields="id"
+        ).execute()
+        return result.get("id")
+    except Exception as exc:
+        app.logger.error(f"[Archive] Google Drive upload failed for ticket {ticket_id}: {exc}")
+        return None
+
+
+def view_archived_ticket(archived: "ArchivedTicket") -> Optional[dict]:
+    """
+    Read-only fetch of an archived ticket's full payload from Drive,
+    without touching the live tables. Returns the parsed JSON payload
+    dict (with 'ticket', 'comments', 'history' keys), or None if the
+    file cannot be downloaded or parsed.
+    """
+    import json as _json_view
+
+    if not archived.gdrive_file_id:
+        return None
+    raw = download_from_gdrive(archived.gdrive_file_id)
+    if raw is None:
+        return None
+    try:
+        gunzipped = gzip.decompress(raw)
+        return _json_view.loads(gunzipped.decode("utf-8"))
+    except Exception as exc:
+        app.logger.error(
+            f"[Archive] Failed to parse archived payload for "
+            f"archived_ticket id={archived.id}: {exc}"
+        )
+        return None
+
+
+def restore_archived_ticket(archived: "ArchivedTicket") -> "Ticket":
+    """
+    Fully restore an archived ticket back into the live tables.
+
+    A NEW Ticket row is created (new auto-increment id) rather than
+    reusing the original id — the id sequence has moved on since the
+    ticket was deleted, and reusing an old PK risks colliding with a
+    ticket created since the archive happened. The original
+    ticket_number is preserved as-is (it's a separate unique string
+    column, not the PK, so no collision there under normal operation).
+
+    Comments and history are re-created as new rows linked to the new
+    ticket id. This function runs inside a single transaction — on any
+    failure it rolls back and re-raises so live data is never partially
+    restored, matching restore_from_backup()'s error contract.
+
+    Marks the ArchivedTicket index row as restored (sets restored_at)
+    but does NOT delete it — it stays as a historical record that this
+    ticket was archived and later brought back.
+    """
+    payload = view_archived_ticket(archived)
+    if payload is None:
+        raise ValueError("Could not fetch archived ticket payload from Drive")
+
+    t_data = payload["ticket"]
+
+    with db.session.begin_nested():
+        new_ticket = Ticket(
+            ticket_number=t_data.get("ticket_number"),
+            title=t_data["title"],
+            description=t_data["description"],
+            type=t_data["type"],
+            priority=t_data["priority"],
+            status=t_data["status"],
+            created_by=t_data["created_by"],
+            assigned_to=t_data.get("assigned_to"),
+            department_id=t_data.get("department_id"),
+            created_at=datetime.fromisoformat(t_data["created_at"]) if t_data.get("created_at") else utc_now(),
+            updated_at=datetime.fromisoformat(t_data["updated_at"]) if t_data.get("updated_at") else utc_now(),
+            sla_breached=t_data.get("sla_breached", False),
+        )
+        db.session.add(new_ticket)
+        db.session.flush()  # assign new_ticket.id
+
+        for c in payload.get("comments", []):
+            db.session.add(Comment(
+                ticket_id=new_ticket.id,
+                user_id=c["user_id"],
+                body=c["body"],
+                created_at=datetime.fromisoformat(c["created_at"]) if c.get("created_at") else utc_now(),
+            ))
+
+        for h in payload.get("history", []):
+            db.session.add(TicketHistory(
+                ticket_id=new_ticket.id,
+                changed_by=h["changed_by"],
+                action=h["action"],
+                old_value=h.get("old_value"),
+                new_value=h.get("new_value"),
+                sla_breached=h.get("sla_breached", False),
+                created_at=datetime.fromisoformat(h["created_at"]) if h.get("created_at") else utc_now(),
+            ))
+
+        archived.restored_at = utc_now()
+
+    db.session.commit()
+    return new_ticket
+
+
+# ─────────────────────────────────────────────
 # TEMPLATES (self-bootstrapping)
 # ─────────────────────────────────────────────
 
@@ -3241,6 +3686,11 @@ TEMPLATES = {
             <li>
               <a class="dropdown-item" href="{{ url_for('admin.backups_list') }}">
                 <i class="bi bi-shield-lock-fill"></i> {{ t('backups') }}
+              </a>
+            </li>
+            <li>
+              <a class="dropdown-item" href="{{ url_for('admin.archived_tickets_list') }}">
+                <i class="bi bi-archive-fill"></i> {{ t('archived_tickets') }}
               </a>
             </li>
             <li>
@@ -5802,6 +6252,206 @@ document.getElementById('deleteBackupModal').addEventListener('show.bs.modal', f
   document.getElementById('deleteBackupForm').action = btn.getAttribute('data-delete-url');
 });
 </script>
+
+{% endblock %}
+""",
+
+"templates/archived_tickets.html": """{% extends 'base.html' %}
+{% block title %}{{ t('archived_tickets_title') }}{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">
+    <i class="bi bi-archive-fill text-secondary me-2"></i>{{ t('archived_tickets_title') }}
+  </h4>
+</div>
+
+{# ── Archived tickets table ───────────────────────────────────── #}
+<div class="card border-0 shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th class="text-center" style="width:60px">{{ t('archive_id') }}</th>
+          <th>{{ t('archive_ticket_number') }}</th>
+          <th>{{ t('archive_title') }}</th>
+          <th class="text-center">{{ t('archive_status') }}</th>
+          <th>{{ t('archive_closed_at') }}</th>
+          <th>{{ t('archive_archived_at') }}</th>
+          <th class="text-center">{{ t('archive_comments') }}</th>
+          <th class="text-end">{{ t('archive_actions') }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if archived %}
+          {% for a in archived %}
+          <tr>
+            <td class="text-center text-muted small">#{{ a.id }}</td>
+            <td class="fw-semibold">{{ a.ticket_number or '—' }}</td>
+            <td>{{ a.title }}</td>
+            <td class="text-center">
+              <span class="badge bg-light text-dark border">{{ a.status }}</span>
+              {% if a.restored_at %}
+                <span class="badge bg-success ms-1">{{ t('archive_restored_badge') }}</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if a.closed_at %}
+                <span class="small">{{ a.closed_at | localtime('%Y-%m-%d') }}</span>
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+            <td>
+              <span class="small">{{ a.archived_at | localtime('%Y-%m-%d %H:%M') }}</span>
+            </td>
+            <td class="text-center">
+              <span class="badge bg-secondary">{{ a.comment_count }}</span>
+            </td>
+            <td class="text-end text-nowrap">
+              {# View #}
+              <a href="{{ url_for('admin.view_archived_ticket_route', archived_id=a.id) }}"
+                 class="btn btn-outline-primary btn-sm me-1"
+                 title="{{ t('archive_view') }}">
+                <i class="bi bi-eye"></i>
+              </a>
+
+              {# Download #}
+              <a href="{{ url_for('admin.download_archived_ticket', archived_id=a.id) }}"
+                 class="btn btn-outline-secondary btn-sm me-1"
+                 title="{{ t('archive_download') }}">
+                <i class="bi bi-download"></i>
+              </a>
+
+              {# Restore — requires confirmation modal; disabled if already restored #}
+              {% if not a.restored_at %}
+              <button type="button"
+                      class="btn btn-outline-success btn-sm"
+                      title="{{ t('archive_restore') }}"
+                      data-bs-toggle="modal"
+                      data-bs-target="#restoreArchiveModal"
+                      data-archive-number="{{ a.ticket_number or a.id }}"
+                      data-restore-url="{{ url_for('admin.restore_archived_ticket_route', archived_id=a.id) }}">
+                <i class="bi bi-arrow-counterclockwise"></i>
+              </button>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr>
+            <td colspan="8" class="text-center text-muted py-5">
+              <i class="bi bi-archive fs-2 d-block mb-2 opacity-25"></i>
+              {{ t('archive_no_records') }}
+            </td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# ── Restore Confirmation Modal ───────────────────────────────── #}
+<div class="modal fade" id="restoreArchiveModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content border-0 shadow">
+      <div class="modal-header bg-success text-white">
+        <h5 class="modal-title fw-bold">
+          <i class="bi bi-arrow-counterclockwise me-2"></i>
+          {{ t('archive_restore') }}
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2">{{ t('archive_confirm_restore') }}</p>
+        <p class="small text-muted mb-0">
+          {% if lang == 'ar' %}
+            التذكرة: <strong id="restoreArchiveNumber"></strong>
+          {% else %}
+            Ticket: <strong id="restoreArchiveNumber"></strong>
+          {% endif %}
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">
+          {{ t('cancel') }}
+        </button>
+        <form method="POST" id="restoreArchiveForm">
+          {{ form.hidden_tag() }}
+          <button type="submit" class="btn btn-success btn-sm">
+            <i class="bi bi-arrow-counterclockwise me-1"></i>{{ t('archive_restore') }}
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.getElementById('restoreArchiveModal').addEventListener('show.bs.modal', function (e) {
+  var btn = e.relatedTarget;
+  var num = btn.getAttribute('data-archive-number');
+  document.getElementById('restoreArchiveNumber').textContent = num;
+  document.getElementById('restoreArchiveForm').action = btn.getAttribute('data-restore-url');
+});
+</script>
+
+{% endblock %}
+""",
+
+"templates/archived_ticket_view.html": """{% extends 'base.html' %}
+{% block title %}{{ t('archive_view_title') }}{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">
+    <i class="bi bi-archive-fill text-secondary me-2"></i>{{ t('archive_view_title') }}
+  </h4>
+  <a href="{{ url_for('admin.archived_tickets_list') }}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-left me-1"></i>{{ t('archive_back_to_list') }}
+  </a>
+</div>
+
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <div class="row g-3 mb-3">
+      <div class="col-md-3">
+        <div class="text-muted small">{{ t('archive_original_id') }}</div>
+        <div class="fw-semibold">#{{ payload.ticket.id }}</div>
+      </div>
+      <div class="col-md-3">
+        <div class="text-muted small">{{ t('archive_ticket_number') }}</div>
+        <div class="fw-semibold">{{ payload.ticket.ticket_number or '—' }}</div>
+      </div>
+      <div class="col-md-3">
+        <div class="text-muted small">{{ t('archive_status') }}</div>
+        <div><span class="badge bg-light text-dark border">{{ payload.ticket.status }}</span></div>
+      </div>
+      <div class="col-md-3">
+        <div class="text-muted small">{{ t('archive_archived_at') }}</div>
+        <div class="fw-semibold">{{ archived.archived_at | localtime('%Y-%m-%d %H:%M') }}</div>
+      </div>
+    </div>
+    <h5 class="fw-bold">{{ payload.ticket.title }}</h5>
+    <p class="text-muted" style="white-space: pre-wrap;">{{ payload.ticket.description }}</p>
+  </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+  <div class="card-header bg-light fw-semibold">
+    {{ t('archive_comments') }} ({{ payload.comments | length }})
+  </div>
+  <div class="list-group list-group-flush">
+    {% for c in payload.comments %}
+    <div class="list-group-item">
+      <p class="mb-1" style="white-space: pre-wrap;">{{ c.body }}</p>
+      <span class="text-muted small">{{ c.created_at }}</span>
+    </div>
+    {% else %}
+    <div class="list-group-item text-muted text-center py-4">—</div>
+    {% endfor %}
+  </div>
+</div>
 
 {% endblock %}
 """,
@@ -8573,6 +9223,104 @@ def delete_backup(backup_id):
         app.logger.error(f"[Backup] delete failed for id={backup_id}: {exc}")
         flash(t("flash_delete_error"), "danger")
     return redirect(url_for("admin.backups_list"))
+
+
+# ─────────────────────────────────────────────
+# ARCHIVED TICKETS ROUTES
+# ─────────────────────────────────────────────
+
+@admin_bp.route("/archived-tickets")
+@admin_required
+def archived_tickets_list():
+    """
+    Show all archived-ticket index rows, newest first — same pattern as
+    backups_list(): a lightweight listing page over the index table only
+    (the full ticket/comments/history payload lives on Drive, fetched on
+    demand by the view/restore routes below, never loaded here).
+    """
+    archived = (
+        ArchivedTicket.query
+        .order_by(ArchivedTicket.archived_at.desc())
+        .all()
+    )
+    return render_template_string(
+        TEMPLATES["templates/archived_tickets.html"],
+        archived=archived,
+        form=EmptyForm(),
+    )
+
+
+@admin_bp.route("/archived-tickets/<int:archived_id>/view")
+@admin_required
+def view_archived_ticket_route(archived_id):
+    """
+    Read-only view of an archived ticket's full content, fetched from
+    Drive. Does not touch the live tables at all.
+    """
+    archived = db.get_or_404(ArchivedTicket, archived_id)
+    payload = view_archived_ticket(archived)
+    if payload is None:
+        flash(t("flash_archive_view_error"), "danger")
+        return redirect(url_for("admin.archived_tickets_list"))
+    return render_template_string(
+        TEMPLATES["templates/archived_ticket_view.html"],
+        archived=archived,
+        payload=payload,
+    )
+
+
+@admin_bp.route("/archived-tickets/<int:archived_id>/download")
+@admin_required
+def download_archived_ticket(archived_id):
+    """Stream the archived ticket's JSON payload as a file download."""
+    import io
+    archived = db.get_or_404(ArchivedTicket, archived_id)
+    payload = view_archived_ticket(archived)
+    if payload is None:
+        flash(t("flash_archive_view_error"), "danger")
+        return redirect(url_for("admin.archived_tickets_list"))
+    import json as _json
+    json_bytes = _json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    filename = f"archived_ticket_{archived.ticket_number or archived.original_ticket_id}.json"
+    return send_file(
+        io.BytesIO(json_bytes),
+        mimetype="application/json",
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
+@admin_bp.route("/archived-tickets/<int:archived_id>/restore", methods=["POST"])
+@admin_required
+def restore_archived_ticket_route(archived_id):
+    """
+    Fully restore an archived ticket back into the live tables as a new
+    ticket. See restore_archived_ticket() for the restore contract.
+    """
+    form = EmptyForm()
+    if not form.validate_on_submit():
+        abort(400)
+
+    archived = db.get_or_404(ArchivedTicket, archived_id)
+    if archived.restored_at is not None:
+        flash(t("flash_archive_already_restored"), "warning")
+        return redirect(url_for("admin.archived_tickets_list"))
+
+    try:
+        new_ticket = restore_archived_ticket(archived)
+        write_admin_log(
+            "archived_ticket_restored", "ticket",
+            target_id=new_ticket.id,
+            target_name=f"{archived.ticket_number} (was archived_ticket id={archived.id})",
+        )
+        db.session.commit()
+        flash(t("flash_archive_restored", num=new_ticket.ticket_number or new_ticket.id), "success")
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.error(f"[Archive] restore failed for archived_ticket id={archived_id}: {exc}")
+        flash(t("flash_archive_restore_error"), "danger")
+
+    return redirect(url_for("admin.archived_tickets_list"))
 
 
 # ── System Settings ───────────────────────────
