@@ -2540,7 +2540,7 @@ def create_backup(source: str = "auto") -> Backup | None:
         2. Dump to JSON and measure the byte size.
         3. Save a Backup record to Neon (always).
         4. Attempt to upload to Google Drive (optional — non-fatal if it fails).
-        5. Delete Backup records older than 15 days to cap DB growth.
+        5. Delete Backup records older than 7 days to cap DB growth.
 
     Returns the new Backup instance, or None on error.
     Note: the daily_backup scheduler job calls this via a lambda so that
@@ -2694,7 +2694,7 @@ def create_backup(source: str = "auto") -> Backup | None:
             # ── 2. Dump to JSON then compress ───────────────────────
             json_str   = _json.dumps(data, ensure_ascii=False, indent=2)
             json_bytes = json_str.encode("utf-8")
-            gzip_bytes = gzip.compress(json_bytes, compresslevel=6)
+            gzip_bytes = gzip.compress(json_bytes, compresslevel=9)
             size_kb      = len(json_bytes)  // 1024
             size_gz_kb   = len(gzip_bytes)  // 1024
 
@@ -2710,8 +2710,8 @@ def create_backup(source: str = "auto") -> Backup | None:
 
             db.session.commit()
 
-            # ── 5. Prune backups older than 15 days ──────────────────
-            cutoff = now - timedelta(days=15)
+            # ── 5. Prune backups older than 7 days ───────────────────
+            cutoff = now - timedelta(days=7)
             old_backups = Backup.query.filter(Backup.created_at < cutoff).all()
             for old in old_backups:
                 # Delete from Google Drive first (before removing the DB record)
